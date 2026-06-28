@@ -1,0 +1,103 @@
+.openlore-sidebar {
+	padding: 8px;
+}
+
+.openlore-header {
+	margin-bottom: 12px;
+}
+
+.openlore-title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.openlore-title-row h4 {
+	margin: 0;
+}
+
+.openlore-refresh-btn {
+	padding: 4px;
+}
+
+.openlore-badge {
+	margin-top: 8px;
+	padding: 6px 10px;
+	background: var(--background-modifier-info);
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-small);
+}
+
+.openlore-error {
+	padding: 10px;
+	color: var(--text-error);
+	background: var(--background-modifier-error);
+	border-radius: var(--radius-s);
+}
+
+.openlore-loading,
+.openlore-empty {
+	padding: 16px 10px;
+	color: var(--text-muted);
+	text-align: center;
+	font-size: var(--font-ui-small);
+}
+
+.openlore-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.openlore-item {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	padding: 8px 10px;
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+	border: 1px solid var(--background-modifier-border);
+}
+
+.openlore-item input[type="checkbox"] {
+	margin-top: 3px;
+	flex-shrink: 0;
+}
+
+.openlore-item label {
+	flex: 1;
+	cursor: pointer;
+}
+
+.openlore-claim {
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	line-height: 1.4;
+}
+
+.openlore-route {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-accent);
+	margin-top: 2px;
+}
+
+.openlore-route-none {
+	color: var(--text-muted);
+}
+
+.openlore-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 12px;
+	padding-top: 12px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.openlore-promote-btn {
+	flex: 1;
+}
+
+.openlore-keep-btn {
+	flex-shrink: 0;
+}
