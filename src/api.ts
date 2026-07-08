@@ -1,103 +1,156 @@
 import { requestUrl } from "obsidian";
-import { Proposal } from "./types";
+import { DocsetRow, parseDocsets } from "./types";
+
+/** Thrown when the server rejects the bearer token even after a refresh. */
+export class UnauthorizedError extends Error {}
+
+export interface ApiConfig {
+	serverUrl: string;
+	/** Returns the current access token. */
+	getToken: () => string;
+	/**
+	 * Called on a 401 to obtain a fresh access token (via refresh). Returns the
+	 * new token, or null if re-auth is required. Requests are retried once.
+	 */
+	refresh: () => Promise<string | null>;
+}
+
+interface ShellResult {
+	output: string;
+	isError: boolean;
+}
 
 /**
- * HTTP client for the OpenLore knowledge-backend.
+ * Client for go-openlore's JSON HTTP API (`POST /api/shell`). Every file
+ * operation is expressed as a scoped shell command run as the signed-in
+ * identity; the server enforces lore/docset access and writability.
  *
- * Obsidian is a thin acting surface: publishing a note ingests the raw
- * markdown (`POST /ingest/transcript`) and triggers synchronous extraction
- * (`POST /process/transcripts`). Extracted facts land in the proposal review
- * queue (`/ontology/proposals`), which the sidebar accepts or rejects. No
- * local heuristic extraction happens in the plugin — the backend owns it.
+ * File content is transferred base64-encoded on write (`base64 -d`) so no file
+ * content ever needs shell escaping. Paths are single-quoted.
  */
 export class OpenLoreAPI {
-	constructor(
-		private serverUrl: string,
-		private apiToken: string,
-		private agentId: string
-	) {}
+	constructor(private cfg: ApiConfig) {}
 
-	private url(path: string): string {
-		return `${this.serverUrl.replace(/\/+$/, "")}${path}`;
+	private base(): string {
+		return this.cfg.serverUrl.replace(/\/+$/, "");
 	}
 
-	private headers(): Record<string, string> {
-		const h: Record<string, string> = { "Content-Type": "application/json" };
-		if (this.apiToken) {
-			h["Authorization"] = `Bearer ${this.apiToken}`;
+	/** Run one shell command, refreshing the token once on a 401. */
+	async shell(command: string): Promise<ShellResult> {
+		let res = await this.rawShell(command, this.cfg.getToken());
+		if (res.status === 401) {
+			const token = await this.cfg.refresh();
+			if (!token) {
+				throw new UnauthorizedError("Sign in to OpenLore again.");
+			}
+			res = await this.rawShell(command, token);
+			if (res.status === 401) {
+				throw new UnauthorizedError("Sign in to OpenLore again.");
+			}
 		}
-		return h;
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`shell ${res.status}: ${res.text || "request failed"}`);
+		}
+		const body = res.json as { output?: string; is_error?: boolean };
+		const output = body?.output ?? "";
+		if (body?.is_error) {
+			throw new Error(output.trim() || "command failed");
+		}
+		// The server reports command failures with is_error:false, appending the
+		// non-zero status as a trailing "exit code: N" line. Surface those as
+		// errors so callers (and the sync engine) don't treat them as success.
+		const m = output.match(/\n\nexit code: (\d+)\s*$/);
+		if (m && m[1] !== "0") {
+			const msg = output.slice(0, m.index).trim();
+			throw new Error(msg || `command failed (exit code ${m[1]})`);
+		}
+		return { output, isError: false };
+	}
+
+	private rawShell(command: string, token: string) {
+		return requestUrl({
+			url: `${this.base()}/api/shell`,
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				...(token ? { Authorization: `Bearer ${token}` } : {}),
+			},
+			body: JSON.stringify({ command }),
+			throw: false,
+		});
+	}
+
+	/** List the docsets the identity can access. */
+	async listDocsets(): Promise<DocsetRow[]> {
+		const { output } = await this.shell("lore docsets");
+		return parseDocsets(output);
+	}
+
+	/** List markdown files under a virtual path (recursively). */
+	async listFiles(vfsDir: string): Promise<string[]> {
+		const { output } = await this.shell(
+			`find ${q(vfsDir)} -type f -name '*.md'`
+		);
+		return output
+			.split("\n")
+			.map((l) => l.trim())
+			.filter((l) => l.length > 0);
+	}
+
+	/** Read a file's content. */
+	async readFile(vfsPath: string): Promise<string> {
+		const { output } = await this.shell(`cat ${q(vfsPath)}`);
+		return output;
 	}
 
 	/**
-	 * Publish a note's raw markdown to the knowledge backend as a transcript.
-	 * Provenance (acting agent) and the observation time are recorded.
+	 * Create or overwrite a file with the given content, creating parent dirs.
+	 *
+	 * The docset root always exists on the server and cannot be `mkdir`ed (it
+	 * fails with "cannot create docset root"), so we only create intermediate
+	 * directories strictly below `mountRoot`. Writing a file directly under the
+	 * root needs no `mkdir` at all.
 	 */
-	async publishNote(
-		path: string,
+	async writeFile(
+		vfsPath: string,
 		content: string,
-		observedAt: Date
-	): Promise<{ id: string }> {
-		const body = `# Source: ${path}\n\n${content}`;
-		const response = await requestUrl({
-			url: this.url("/ingest/transcript"),
-			method: "POST",
-			headers: this.headers(),
-			body: JSON.stringify({
-				actor: this.agentId,
-				tool: "obsidian",
-				agent_id: this.agentId,
-				timestamp: observedAt.toISOString(),
-				content: body,
-			}),
-		});
-		return response.json;
+		mountRoot = ""
+	): Promise<void> {
+		const b64 = base64(content);
+		const dir = parentDir(vfsPath);
+		const root = mountRoot.replace(/\/+$/, "");
+		const write = `echo ${q(b64)} | base64 -d > ${q(vfsPath)}`;
+		const command =
+			dir && dir !== root ? `mkdir -p ${q(dir)} && ${write}` : write;
+		await this.shell(command);
 	}
 
-	/**
-	 * Trigger synchronous extraction of all unprocessed transcripts. Returns
-	 * after staged assertions have been created.
-	 */
-	async processTranscripts(): Promise<unknown> {
-		const response = await requestUrl({
-			url: this.url("/process/transcripts"),
-			method: "POST",
-			headers: this.headers(),
-			body: "{}",
-		});
-		return response.json;
+	/** Delete a file (requires the server's `rm` command). */
+	async deleteFile(vfsPath: string): Promise<void> {
+		await this.shell(`rm ${q(vfsPath)}`);
 	}
 
-	/** Fetch staged assertions awaiting review. */
-	async listProposals(status = "pending"): Promise<Proposal[]> {
-		const response = await requestUrl({
-			url: this.url(`/ontology/proposals?status=${encodeURIComponent(status)}`),
-			method: "GET",
-			headers: this.headers(),
-		});
-		const json = response.json;
-		// Endpoint returns either a bare array or { proposals: [...] }.
-		if (Array.isArray(json)) return json;
-		return json?.proposals ?? [];
+	/** Move/rename a file (requires the server's `mv` command). */
+	async moveFile(from: string, to: string): Promise<void> {
+		await this.shell(`mv ${q(from)} ${q(to)}`);
 	}
+}
 
-	/** Accept a staged assertion into the knowledge base. */
-	async approveProposal(id: string): Promise<void> {
-		await requestUrl({
-			url: this.url(`/ontology/proposals/${encodeURIComponent(id)}/approve`),
-			method: "POST",
-			headers: this.headers(),
-			body: "{}",
-		});
-	}
+/** Single-quote a value for POSIX shell (safe against every metacharacter). */
+function q(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
-	/** Reject a staged assertion. */
-	async rejectProposal(id: string): Promise<void> {
-		await requestUrl({
-			url: this.url(`/ontology/proposals/${encodeURIComponent(id)}/reject`),
-			method: "POST",
-			headers: this.headers(),
-			body: "{}",
-		});
-	}
+/** The parent directory of a virtual path, or "" if it has none. */
+function parentDir(vfsPath: string): string {
+	const i = vfsPath.replace(/\/+$/, "").lastIndexOf("/");
+	return i > 0 ? vfsPath.slice(0, i) : "";
+}
+
+/** UTF-8 safe base64 of a string. */
+function base64(content: string): string {
+	const bytes = new TextEncoder().encode(content);
+	let s = "";
+	for (const b of bytes) s += String.fromCharCode(b);
+	return btoa(s);
 }

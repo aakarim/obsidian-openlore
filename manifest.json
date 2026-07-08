@@ -1,10 +1,10 @@
 {
 	"id": "openlore",
 	"name": "OpenLore",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"minAppVersion": "1.0.0",
-	"description": "Auto-sync vault insights to your OpenLore personal space. Promote knowledge to company brain without leaving Obsidian.",
+	"description": "Two-way sync between your Obsidian vault and a shared OpenLore knowledge server. Read your team's folders, write your own.",
 	"author": "OpenLore",
 	"authorUrl": "https://openlore.sh",
-	"isDesktopOnly": false
+	"isDesktopOnly": true
 }

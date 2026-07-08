@@ -2,102 +2,234 @@
 	padding: 8px;
 }
 
-.openlore-header {
-	margin-bottom: 12px;
-}
-
 .openlore-title-row {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
+	margin-bottom: 8px;
 }
 
 .openlore-title-row h4 {
 	margin: 0;
 }
 
-.openlore-refresh-btn {
-	padding: 4px;
-}
-
-.openlore-badge {
-	margin-top: 8px;
-	padding: 6px 10px;
-	background: var(--background-modifier-info);
-	border-radius: var(--radius-s);
-	font-size: var(--font-ui-small);
-}
-
-.openlore-error {
-	padding: 10px;
-	color: var(--text-error);
-	background: var(--background-modifier-error);
-	border-radius: var(--radius-s);
-}
-
-.openlore-loading,
-.openlore-empty {
-	padding: 16px 10px;
+.openlore-section {
+	margin: 16px 0 4px;
 	color: var(--text-muted);
-	text-align: center;
-	font-size: var(--font-ui-small);
+	text-transform: uppercase;
+	font-size: var(--font-ui-smaller);
+	letter-spacing: 0.05em;
 }
 
+/* Status */
+.openlore-status {
+	padding: 10px 12px;
+	background: var(--background-secondary);
+	border-radius: var(--radius-s);
+}
+
+.openlore-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--text-muted);
+	margin-right: 6px;
+	vertical-align: middle;
+}
+
+.openlore-dot.is-ok {
+	background: var(--color-green, #3fb950);
+}
+
+.openlore-dot.is-error {
+	background: var(--text-error);
+}
+
+.openlore-status-label {
+	font-weight: 600;
+}
+
+.openlore-status-sub {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-top: 2px;
+	word-break: break-word;
+}
+
+.openlore-status-err {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-error);
+	margin-top: 4px;
+	word-break: break-word;
+}
+
+/* Actions */
+.openlore-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 10px;
+}
+
+.openlore-actions button {
+	flex: 1;
+}
+
+/* Lists */
 .openlore-list {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
-	margin-top: 8px;
+	gap: 6px;
+	margin-top: 6px;
 }
 
 .openlore-item {
-	display: flex;
-	gap: 8px;
-	align-items: flex-start;
-	padding: 8px 10px;
+	padding: 6px 10px;
 	background: var(--background-secondary);
 	border-radius: var(--radius-s);
 	border: 1px solid var(--background-modifier-border);
 }
 
-.openlore-item input[type="checkbox"] {
-	margin-top: 3px;
-	flex-shrink: 0;
-}
-
-.openlore-item label {
-	flex: 1;
-	cursor: pointer;
-}
-
 .openlore-claim {
 	font-size: var(--font-ui-small);
 	color: var(--text-normal);
-	line-height: 1.4;
 }
 
-.openlore-route {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-accent);
-	margin-top: 2px;
+.openlore-empty {
+	padding: 12px 10px;
+	color: var(--text-muted);
+	text-align: center;
+	font-size: var(--font-ui-small);
 }
 
-.openlore-route-none {
+/* Onboarding modal */
+.openlore-onboarding .openlore-brand {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.openlore-brand-mark {
+	font-size: 1.5em;
+}
+
+.openlore-onboarding h2 {
+	margin: 0;
+}
+
+.openlore-brand-sub {
+	color: var(--text-muted);
+	margin: 4px 0 12px;
+}
+
+.openlore-onboarding-status {
+	min-height: 20px;
+	margin-top: 8px;
+	font-size: var(--font-ui-small);
 	color: var(--text-muted);
 }
 
-.openlore-actions {
-	display: flex;
-	gap: 8px;
-	margin-top: 12px;
-	padding-top: 12px;
-	border-top: 1px solid var(--background-modifier-border);
+.openlore-onboarding-status.is-error {
+	color: var(--text-error);
 }
 
-.openlore-promote-btn {
+.openlore-warning {
+	margin-top: 12px;
+	padding: 10px 12px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-error-hover, rgba(233, 49, 71, 0.1));
+	border: 1px solid var(--text-error);
+}
+
+.openlore-warning-title {
+	font-weight: 600;
+	color: var(--text-error);
+}
+
+.openlore-warning-body {
+	margin-top: 4px;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+}
+
+/* Mapping rows */
+.openlore-section-row {
+	margin: 16px 0 4px;
+	align-items: center;
+}
+
+.openlore-section-row .openlore-section {
+	margin: 0;
+}
+
+.openlore-map-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.openlore-map-info {
+	min-width: 0;
 	flex: 1;
 }
 
-.openlore-keep-btn {
-	flex-shrink: 0;
+.openlore-map-info .openlore-claim {
+	display: block;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* File-explorer badge on mapped folders.
+   `selfEl` (.nav-folder-title / .tree-item-self) is a flex row, so
+   margin-left:auto pushes the badge to the trailing edge like Relay. */
+.openlore-tree-badge {
+	display: inline-flex;
+	align-items: center;
+	margin-left: auto;
+	padding-left: 4px;
+	flex: 0 0 auto;
+	color: var(--text-accent);
+	opacity: 0.6;
+	cursor: help;
+}
+
+.openlore-tree-badge:hover {
+	opacity: 1;
+}
+
+.openlore-tree-badge svg {
+	width: 14px;
+	height: 14px;
+}
+
+/* Dirty-file dot: local edits not yet pushed to the server. */
+.openlore-dirty-dot {
+	margin-left: auto;
+	flex: 0 0 auto;
+	align-self: center;
+	width: 8px;
+	height: 8px;
+	margin-right: 2px;
+	border-radius: 50%;
+	background-color: var(--color-orange, #e0913a);
+	cursor: help;
+}
+
+/* Error-file dot: last sync attempt failed. Click to open the console. */
+.openlore-error-dot {
+	margin-left: auto;
+	flex: 0 0 auto;
+	align-self: center;
+	width: 8px;
+	height: 8px;
+	margin-right: 2px;
+	border-radius: 50%;
+	background-color: var(--text-error, #e93147);
+	cursor: pointer;
+}
+
+.openlore-error-dot:hover {
+	box-shadow: 0 0 0 2px var(--background-modifier-error-hover, rgba(233, 49, 71, 0.3));
 }

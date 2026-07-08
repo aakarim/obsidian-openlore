@@ -1,17 +1,17 @@
-import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, WorkspaceLeaf, setIcon, Setting, Notice } from "obsidian";
 import type OpenLorePlugin from "../main";
-import { Proposal } from "./types";
+import { settingsValid } from "./types";
+import { OnboardingModal } from "./onboarding";
+import { MapFolderModal } from "./map-folder";
 
 export const SIDEBAR_VIEW_TYPE = "openlore-view";
 
 /**
- * Review sidebar over the OpenLore proposal queue. Lists staged assertions
- * extracted from published notes and lets the user accept or reject them.
+ * OpenLore control panel: connection status, settings, synced-folder mappings,
+ * and sync actions. This is the primary settings surface for the plugin.
  */
 export class OpenLoreSidebarView extends ItemView {
-	private proposals: Proposal[] = [];
-	private selected = new Set<string>();
-	private loading = false;
+	private status: "ok" | "error" | "loading" = "loading";
 	private error: string | null = null;
 
 	constructor(
@@ -24,11 +24,9 @@ export class OpenLoreSidebarView extends ItemView {
 	getViewType(): string {
 		return SIDEBAR_VIEW_TYPE;
 	}
-
 	getDisplayText(): string {
 		return "OpenLore";
 	}
-
 	getIcon(): string {
 		return "brain";
 	}
@@ -43,25 +41,38 @@ export class OpenLoreSidebarView extends ItemView {
 	}
 
 	async refresh(): Promise<void> {
-		if (!this.plugin.settings.serverUrl) {
-			this.error = "Configure the server URL in settings.";
+		const s = this.plugin.settings;
+		if (!s.onboardingComplete) {
+			this.status = "error";
+			this.error = "Not set up yet.";
+			this.render();
+			return;
+		}
+		if (!s.accessToken) {
+			this.status = "error";
+			this.error = "Signed out.";
 			this.render();
 			return;
 		}
 
-		this.loading = true;
-		this.error = null;
+		this.status = "loading";
 		this.render();
-
 		try {
-			this.proposals = await this.plugin.api.listProposals("pending");
-			this.selected.clear();
-		} catch (e: unknown) {
-			this.error = e instanceof Error ? e.message : "Failed to fetch proposals";
-			this.proposals = [];
+			await this.plugin.refreshDocsets();
+			if (!s.identity) {
+				this.status = "error";
+				this.error =
+					"Signed in without an identity (anonymous token). Register a " +
+					"passkey bound to an identity on the server: " +
+					"`passkey register --identity <name>`.";
+			} else {
+				this.status = "ok";
+				this.error = null;
+			}
+		} catch (e) {
+			this.status = "error";
+			this.error = e instanceof Error ? e.message : "Connection failed";
 		}
-
-		this.loading = false;
 		this.render();
 	}
 
@@ -70,129 +81,151 @@ export class OpenLoreSidebarView extends ItemView {
 		el.empty();
 		el.addClass("openlore-sidebar");
 
-		const header = el.createDiv({ cls: "openlore-header" });
-		const titleRow = header.createDiv({ cls: "openlore-title-row" });
-		titleRow.createEl("h4", { text: "OpenLore" });
-
-		const refreshBtn = titleRow.createEl("button", {
-			cls: "openlore-refresh-btn clickable-icon",
+		const header = el.createDiv({ cls: "openlore-title-row" });
+		header.createEl("h4", { text: "OpenLore" });
+		const refreshBtn = header.createEl("button", {
+			cls: "clickable-icon",
 			attr: { "aria-label": "Refresh" },
 		});
 		setIcon(refreshBtn, "refresh-cw");
 		refreshBtn.addEventListener("click", () => this.refresh());
 
-		if (this.error) {
-			el.createDiv({ cls: "openlore-error", text: this.error });
-			return;
-		}
-
-		if (this.loading) {
-			el.createDiv({ cls: "openlore-loading", text: "Loading proposals..." });
-			return;
-		}
-
-		if (this.proposals.length === 0) {
+		const s = this.plugin.settings;
+		if (!s.onboardingComplete) {
 			el.createDiv({
 				cls: "openlore-empty",
-				text: "No staged facts to review. Publish a note first.",
+				text: "Connect your vault to a lore server to get started.",
+			});
+			new Setting(el).addButton((b) =>
+				b
+					.setButtonText("Set up OpenLore")
+					.setCta()
+					.onClick(() => this.openSetup())
+			);
+			return;
+		}
+
+		this.renderStatus(el);
+		this.renderActions(el);
+		this.renderMappings(el);
+	}
+
+	private renderStatus(el: HTMLElement): void {
+		const s = this.plugin.settings;
+		const box = el.createDiv({ cls: "openlore-status" });
+		const dot = box.createSpan({ cls: "openlore-dot" });
+		if (this.status === "ok") dot.addClass("is-ok");
+		else if (this.status === "error") dot.addClass("is-error");
+
+		const label =
+			this.status === "ok"
+				? "Connected"
+				: this.status === "loading"
+					? "Connecting…"
+					: s.accessToken
+						? "Disconnected"
+						: "Signed out";
+		box.createSpan({ cls: "openlore-status-label", text: label });
+
+		box.createDiv({ cls: "openlore-status-sub", text: s.serverUrl });
+		box.createDiv({
+			cls: "openlore-status-sub",
+			text: s.identity || "(not signed in)",
+		});
+		if (this.error) {
+			box.createDiv({ cls: "openlore-status-err", text: this.error });
+		}
+		if (this.plugin.sync.lastSync) {
+			box.createDiv({
+				cls: "openlore-status-sub",
+				text: `Last sync: ${this.plugin.sync.lastSync.toLocaleTimeString()}`,
+			});
+		}
+	}
+
+	private renderActions(el: HTMLElement): void {
+		const s = this.plugin.settings;
+		const actions = el.createDiv({ cls: "openlore-actions" });
+
+		const syncBtn = actions.createEl("button", {
+			cls: "mod-cta",
+			text: "Sync now",
+		});
+		syncBtn.disabled = !settingsValid(s);
+		syncBtn.addEventListener("click", async () => {
+			syncBtn.disabled = true;
+			syncBtn.textContent = "Syncing…";
+			await this.plugin.syncNow();
+			await this.refresh();
+		});
+
+		if (s.accessToken) {
+			const outBtn = actions.createEl("button", { text: "Sign out" });
+			outBtn.addEventListener("click", () => {
+				this.plugin.signOut();
+				this.refresh();
+			});
+		} else {
+			const inBtn = actions.createEl("button", { text: "Sign in" });
+			inBtn.addEventListener("click", () => this.openSetup());
+		}
+	}
+
+	private renderMappings(el: HTMLElement): void {
+		const s = this.plugin.settings;
+		const row = el.createDiv({ cls: "openlore-title-row openlore-section-row" });
+		row.createEl("h5", { text: "Synced folders", cls: "openlore-section" });
+		const addBtn = row.createEl("button", {
+			cls: "clickable-icon",
+			attr: { "aria-label": "Add folder" },
+		});
+		setIcon(addBtn, "plus");
+		addBtn.toggleAttribute("disabled", !settingsValid(s));
+		addBtn.addEventListener("click", () => this.openMapFolder());
+
+		if (this.plugin.mappings.length === 0) {
+			el.createDiv({
+				cls: "openlore-empty",
+				text: "No folders synced yet. Add one to start.",
 			});
 			return;
 		}
 
-		const badge = header.createDiv({ cls: "openlore-badge" });
-		badge.createSpan({
-			text: `🔔 ${this.proposals.length} fact${this.proposals.length === 1 ? "" : "s"} staged for review`,
-		});
-
 		const list = el.createDiv({ cls: "openlore-list" });
-
-		for (const p of this.proposals) {
-			const item = list.createDiv({ cls: "openlore-item" });
-
-			const checkbox = item.createEl("input", {
-				type: "checkbox",
-				attr: { id: `proposal-${p.id}` },
-			});
-			(checkbox as HTMLInputElement).checked = this.selected.has(p.id);
-			checkbox.addEventListener("change", () => {
-				if ((checkbox as HTMLInputElement).checked) {
-					this.selected.add(p.id);
-				} else {
-					this.selected.delete(p.id);
-				}
-				this.updateButtons();
+		for (const m of this.plugin.mappings) {
+			const item = list.createDiv({ cls: "openlore-item openlore-map-item" });
+			const info = item.createDiv({ cls: "openlore-map-info" });
+			info.createSpan({ cls: "openlore-claim", text: m.vaultPath });
+			const access = m.mount
+				? m.access === "rw"
+					? "read/write"
+					: "read-only"
+				: "docset unavailable";
+			info.createDiv({
+				cls: "openlore-status-sub",
+				text: `→ ${m.docset} · ${access}`,
 			});
 
-			const label = item.createEl("label", {
-				attr: { for: `proposal-${p.id}` },
+			const unmap = item.createEl("button", {
+				cls: "clickable-icon",
+				attr: { "aria-label": "Unmap folder" },
 			});
-			label.createDiv({ cls: "openlore-claim", text: `"${p.assertion}"` });
-
-			const meta = p.entity
-				? `${p.entity}`
-				: p.proposal_type;
-			label.createDiv({ cls: "openlore-route", text: `→ ${meta}` });
-		}
-
-		const actions = el.createDiv({ cls: "openlore-actions" });
-
-		const acceptBtn = actions.createEl("button", {
-			cls: "mod-cta openlore-promote-btn",
-			text: "Accept selected",
-		});
-		acceptBtn.disabled = this.selected.size === 0;
-		acceptBtn.addEventListener("click", () => this.review(true));
-
-		const rejectBtn = actions.createEl("button", {
-			cls: "openlore-keep-btn",
-			text: "Reject selected",
-		});
-		rejectBtn.disabled = this.selected.size === 0;
-		rejectBtn.addEventListener("click", () => this.review(false));
-	}
-
-	private updateButtons(): void {
-		const acceptBtn = this.contentEl.querySelector(
-			".openlore-promote-btn"
-		) as HTMLButtonElement | null;
-		const rejectBtn = this.contentEl.querySelector(
-			".openlore-keep-btn"
-		) as HTMLButtonElement | null;
-		const has = this.selected.size > 0;
-		if (acceptBtn) {
-			acceptBtn.disabled = !has;
-			acceptBtn.textContent = `Accept selected (${this.selected.size})`;
-		}
-		if (rejectBtn) {
-			rejectBtn.disabled = !has;
-			rejectBtn.textContent = `Reject selected (${this.selected.size})`;
+			setIcon(unmap, "unlink");
+			unmap.addEventListener("click", async () => {
+				await this.plugin.removeMapping(m.vaultPath);
+				new Notice(`OpenLore: unmapped ${m.vaultPath}`);
+				this.render();
+			});
 		}
 	}
 
-	private async review(accept: boolean): Promise<void> {
-		if (this.selected.size === 0) return;
+	private openMapFolder(): void {
+		new MapFolderModal(this.app, this.plugin, () => this.render()).open();
+	}
 
-		const ids = Array.from(this.selected);
-		this.loading = true;
-		this.render();
-
-		try {
-			for (const id of ids) {
-				if (accept) {
-					await this.plugin.api.approveProposal(id);
-				} else {
-					await this.plugin.api.rejectProposal(id);
-				}
-			}
-			const verb = accept ? "Accepted" : "Rejected";
-			this.plugin.showNotice(
-				`${verb} ${ids.length} fact${ids.length === 1 ? "" : "s"}.`
-			);
-			await this.refresh();
-		} catch (e: unknown) {
-			this.error = e instanceof Error ? e.message : "Failed to update proposals";
-			this.loading = false;
-			this.render();
-		}
+	private openSetup(): void {
+		new OnboardingModal(this.app, this.plugin, () => {
+			void this.refresh();
+		}).open();
 	}
 }
