@@ -125,9 +125,13 @@ export class OpenLoreAPI {
 		await this.shell(command);
 	}
 
-	/** Delete a file (requires the server's `rm` command). */
+	/**
+	 * Delete a file (requires the server's `rm` command). Uses `-f` so deleting
+	 * an already-removed file is a harmless no-op — important because folder and
+	 * child-file delete events can both try to remove the same path.
+	 */
 	async deleteFile(vfsPath: string): Promise<void> {
-		await this.shell(`rm ${q(vfsPath)}`);
+		await this.shell(`rm -f ${q(vfsPath)}`);
 	}
 
 	/** Move/rename a file (requires the server's `mv` command). */

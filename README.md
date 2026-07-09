@@ -1,8 +1,9 @@
 # OpenLore for Obsidian
 
-Two-way sync between your Obsidian vault and a **shared OpenLore knowledge
-server**. Your team's folders show up in your vault to read; your own notes sync
-back up. No approval queues — just read and write.
+Collaborate on your **agent knowledge**. Two-way sync between your Obsidian
+vault and a **shared OpenLore knowledge server**. Your team's folders show up in
+your vault to read; your own notes sync back up. No approval queues — just read
+and write.
 
 ## How it works
 

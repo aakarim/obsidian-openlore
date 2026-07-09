@@ -20,9 +20,14 @@ import {
 	DEFAULT_SETTINGS,
 	OpenLoreSettings,
 	ResolvedMapping,
-	homeDocsetOf,
+	homeStatus,
+	homeStatusMessage,
+	homeSyncActive,
 	settingsValid,
+	syncEnabled,
 } from "./src/types";
+import { HomeConsentModal } from "./src/home-consent";
+import { KVStore, SETTINGS_KEY, Versioned } from "./src/store";
 import {
 	buildAuthorizeUrl,
 	createPkce,
@@ -40,6 +45,18 @@ const BADGE_CLASS = "openlore-tree-badge";
 const DIRTY_CLASS = "openlore-dirty-dot";
 const ERROR_CLASS = "openlore-error-dot";
 
+/**
+ * Data-schema version of the persisted settings. Monotonically increasing; bump
+ * it and add a step in `migrateSettings` whenever the stored shape changes.
+ */
+const SETTINGS_VERSION = 1;
+
+/** Bring a stored settings payload up to the current shape. */
+function migrateSettings(stored: Versioned<OpenLoreSettings>): OpenLoreSettings {
+	// No shape migrations yet. Future: `if (stored.v < 2) { … }`.
+	return stored.data;
+}
+
 interface PendingAuth {
 	verifier: string;
 	state: string;
@@ -52,20 +69,46 @@ export default class OpenLorePlugin extends Plugin {
 	settings: OpenLoreSettings = DEFAULT_SETTINGS;
 	api!: OpenLoreAPI;
 	sync!: SyncEngine;
+	/** Device-local key-value store (IndexedDB); never synced by any service. */
+	store!: KVStore;
 	/** Resolved folder→docset mappings, rebuilt from Lorefiles on demand. */
 	mappings: ResolvedMapping[] = [];
 
 	private pendingPush = new Set<string>();
+	/**
+	 * Folders currently being moved/renamed (oldPath→newPath). Obsidian fires a
+	 * `rename` event for the folder and then one for each descendant file; we
+	 * reconcile the whole subtree from the folder event and suppress the noisy
+	 * per-child events while an entry is present.
+	 */
+	private renamingFolders = new Map<string, string>();
+	/**
+	 * Folders currently being deleted. Folder deletion is reconciled from the
+	 * folder event (enumerating the server copies); any per-child `delete`
+	 * events some Obsidian versions emit are suppressed while an entry is present.
+	 */
+	private deletingFolders = new Set<string>();
 	private flushDebounced: () => void = () => {};
+	/**
+	 * Set true when the user explicitly saves (Cmd/Ctrl+S). The following
+	 * `modify` event then pushes immediately instead of waiting out the
+	 * auto-sync debounce, so a just-saved file's dirty dot clears at once.
+	 */
+	private saveRequested = false;
+	private saveResetTimer: number | null = null;
+	/** Restores the wrapped `editor:save-file` command callback on unload. */
+	private restoreSaveCommand: (() => void) | null = null;
 	private pullIntervalId: number | null = null;
 	private pendingAuth: PendingAuth | null = null;
 	private refreshInFlight: Promise<string | null> | null = null;
 	private decorateDebounced: () => void = () => {};
 
 	async onload(): Promise<void> {
+		this.store = new KVStore(this.app);
 		await this.loadSettings();
 		this.rebuildApi();
 		this.sync = new SyncEngine(this);
+		await this.sync.loadState();
 		this.rebuildDebounce();
 		this.decorateDebounced = debounce(() => this.decorateExplorer(), 300, true);
 
@@ -90,6 +133,7 @@ export default class OpenLorePlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.decorateDebounced())
 		);
+		this.hookSaveCommand();
 
 		this.addCommand({
 			id: "sync-now",
@@ -126,6 +170,13 @@ export default class OpenLorePlugin extends Plugin {
 
 	onunload(): void {
 		this.stopPullInterval();
+		if (this.saveResetTimer !== null) {
+			window.clearTimeout(this.saveResetTimer);
+			this.saveResetTimer = null;
+		}
+		this.restoreSaveCommand?.();
+		this.restoreSaveCommand = null;
+		void this.sync.flushState().finally(() => this.store.close());
 		this.clearExplorerBadges();
 		if (this.pendingAuth) {
 			window.clearTimeout(this.pendingAuth.timer);
@@ -135,17 +186,36 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	/**
-	 * Settings live in the vault's config dir (`.obsidian/openlore.json`), not
-	 * the plugin's own `data.json`. The plugin folder is often symlinked across
-	 * vaults during development, which would make `data.json` shared; storing in
-	 * the (non-symlinked) config dir keeps each vault's sign-in/server separate.
+	 * Settings (including the access token) live in Obsidian's per-vault
+	 * IndexedDB, not in `.obsidian/` or the plugin's `data.json`. IndexedDB is
+	 * device-local and never synced, so the token can't propagate across devices
+	 * via Obsidian Sync, and each vault stays isolated even when the plugin
+	 * folder is symlinked across vaults during development.
 	 */
-	private settingsPath(): string {
-		return `${this.app.vault.configDir}/openlore.json`;
+	async loadSettings(): Promise<void> {
+		let data: Partial<OpenLoreSettings> | null = null;
+		try {
+			const stored =
+				await this.store.get<Versioned<OpenLoreSettings>>(SETTINGS_KEY);
+			if (stored) {
+				data = migrateSettings(stored);
+			} else {
+				data = await this.importLegacySettings();
+			}
+		} catch {
+			data = null;
+		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
 	}
 
-	async loadSettings(): Promise<void> {
-		const path = this.settingsPath();
+	/**
+	 * One-time import of pre-IndexedDB settings. Reads the old
+	 * `.obsidian/openlore.json` (or the even older shared `data.json`), persists
+	 * it into IndexedDB, and deletes the config-folder copy — so the access
+	 * token no longer propagates across devices via Obsidian Sync's `.obsidian`.
+	 */
+	private async importLegacySettings(): Promise<Partial<OpenLoreSettings> | null> {
+		const path = `${this.app.vault.configDir}/openlore.json`;
 		let data: Partial<OpenLoreSettings> | null = null;
 		try {
 			if (await this.app.vault.adapter.exists(path)) {
@@ -154,18 +224,29 @@ export default class OpenLorePlugin extends Plugin {
 		} catch {
 			data = null;
 		}
-		// One-time migration from the legacy shared plugin data.json.
 		if (!data) {
 			data = (await this.loadData()) as Partial<OpenLoreSettings> | null;
 		}
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
+		if (data) {
+			this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+			await this.saveSettings();
+			try {
+				if (await this.app.vault.adapter.exists(path)) {
+					await this.app.vault.adapter.remove(path);
+				}
+			} catch {
+				// Leaving the old file is harmless; IndexedDB is now the source.
+			}
+		}
+		return data;
 	}
 
 	async saveSettings(): Promise<void> {
-		await this.app.vault.adapter.write(
-			this.settingsPath(),
-			JSON.stringify(this.settings, null, 2)
-		);
+		const payload: Versioned<OpenLoreSettings> = {
+			v: SETTINGS_VERSION,
+			data: this.settings,
+		};
+		await this.store.set(SETTINGS_KEY, payload);
 		this.rebuildApi();
 		this.rebuildDebounce();
 	}
@@ -187,12 +268,53 @@ export default class OpenLorePlugin extends Plugin {
 		new Notice(message);
 	}
 
+	/**
+	 * Whether Obsidian Sync is actively connected to a remote vault for this
+	 * vault — not merely that the Sync core plugin is enabled (it's enabled by
+	 * default, even with no remote vault). We only warn when there's a real
+	 * remote vault, because that's when Sync and OpenLore could cover the same
+	 * files ("double coverage" → conflicts/data loss).
+	 *
+	 * These are internal, reverse-engineered APIs, so every access is guarded and
+	 * we check several connection indicators; if the shape drifts we fail closed
+	 * (no warning) rather than nag when Sync isn't really on.
+	 */
+	isObsidianSyncActive(): boolean {
+		try {
+			const internal = (
+				this.app as unknown as {
+					internalPlugins?: {
+						getPluginById?: (id: string) =>
+							| { enabled?: boolean; instance?: Record<string, unknown> }
+							| undefined;
+					};
+				}
+			).internalPlugins;
+			const plugin = internal?.getPluginById?.("sync");
+			if (plugin?.enabled !== true) return false;
+			const inst = plugin.instance;
+			if (!inst) return false;
+			return (
+				!!inst.remoteVault ||
+				typeof inst.vaultId === "string" ||
+				typeof inst.remoteVaultId === "string"
+			);
+		} catch {
+			return false;
+		}
+	}
+
 	// ---- Folder mappings ----
 
-	/** Rebuild the resolved mapping list from the vault's Lorefiles. */
+	/**
+	 * Rebuild the resolved mapping list from the vault's Lorefiles, plus the
+	 * implicit whole-vault home mapping (root "") when home sync is active.
+	 * Ownership is resolved most-specific-first, so mapped carve-out folders
+	 * take precedence over the home root.
+	 */
 	async rescanMappings(): Promise<void> {
 		const raw = await scanLorefiles(this.app.vault);
-		this.mappings = raw.map((r) => {
+		const mappings: ResolvedMapping[] = raw.map((r) => {
 			const d = this.settings.docsets.find((x) => x.name === r.docset);
 			return {
 				vaultPath: r.vaultPath,
@@ -201,6 +323,16 @@ export default class OpenLorePlugin extends Plugin {
 				access: d?.access ?? "r",
 			};
 		});
+		if (homeSyncActive(this.settings)) {
+			mappings.push({
+				vaultPath: "",
+				docset: this.settings.homeDocset,
+				mount: this.settings.homePath.replace(/\/+$/, ""),
+				access: "rw",
+				isHome: true,
+			});
+		}
+		this.mappings = mappings;
 	}
 
 	/** Map a docset into a (possibly new) vault folder and pull it once. */
@@ -210,7 +342,13 @@ export default class OpenLorePlugin extends Plugin {
 		if (settingsValid(this.settings)) await this.refreshDocsets();
 		await this.rescanMappings();
 		const m = this.mappings.find((x) => x.vaultPath === vaultPath);
-		if (m && m.mount && settingsValid(this.settings)) {
+		if (m && m.mount && syncEnabled(this.settings)) {
+			// Carving a folder out of home into a writable docset: move the local
+			// notes into the new docset and drop the copies left behind in home.
+			// (Read-only carve-outs keep their home copies — see reconcileCarveOut.)
+			if (homeSyncActive(this.settings) && m.access === "rw" && !m.isHome) {
+				await this.sync.reconcileCarveOut(vaultPath);
+			}
 			await this.sync.pullMapping(m);
 		}
 		this.decorateExplorer();
@@ -218,6 +356,9 @@ export default class OpenLorePlugin extends Plugin {
 
 	/** Unmap a folder (removes its Lorefile; leaves the files in place). */
 	async removeMapping(vaultPath: string): Promise<void> {
+		// The whole-vault home mapping (root path) is not `.lore`-backed and must
+		// stay connected — it can only be changed via home selection, not unmapped.
+		if (vaultPath === "") return;
 		await removeLorefile(this.app.vault.adapter, vaultPath);
 		await this.rescanMappings();
 		this.decorateExplorer();
@@ -239,8 +380,12 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private openMapFolder(): void {
-		if (!settingsValid(this.settings)) {
-			this.showNotice("OpenLore: sign in before mapping folders.");
+		if (!syncEnabled(this.settings)) {
+			this.showNotice(
+				settingsValid(this.settings)
+					? `OpenLore: ${homeStatusMessage(homeStatus(this.settings))}`
+					: "OpenLore: sign in before mapping folders."
+			);
 			this.openOnboarding();
 			return;
 		}
@@ -488,15 +633,51 @@ export default class OpenLorePlugin extends Plugin {
 		return this.refreshInFlight;
 	}
 
-	/** Fetch `lore docsets`, record the home docset, and re-resolve mappings. */
+	/** Fetch `lore docsets`, refresh the selected home's mount, re-resolve maps. */
 	async refreshDocsets(): Promise<void> {
 		const docsets = await this.api.listDocsets();
 		this.settings.docsets = docsets;
-		const home = homeDocsetOf(docsets);
-		this.settings.homeDocset = home?.name ?? "";
+		// Keep the user's selected home; refresh its mount (cleared if it vanished
+		// or lost write access — surfaced as an error by homeStatus).
+		const home = docsets.find((d) => d.name === this.settings.homeDocset);
 		this.settings.homePath = home?.paths[0] ?? "";
 		await this.saveSettings();
 		await this.rescanMappings();
+	}
+
+	/**
+	 * Select a docset as the home folder. Must be one of the user's writable
+	 * docsets. Changing the home docset clears prior consent, so the whole-vault
+	 * push into a new home always requires a fresh confirmation.
+	 */
+	async selectHome(docsetName: string): Promise<void> {
+		const changed = docsetName !== this.settings.homeDocset;
+		this.settings.homeDocset = docsetName;
+		const d = this.settings.docsets.find((x) => x.name === docsetName);
+		this.settings.homePath = d?.paths[0] ?? "";
+		if (changed) this.settings.homeSyncConsentedFor = "";
+		await this.saveSettings();
+		await this.rescanMappings();
+		if (homeSyncActive(this.settings)) {
+			await this.afterOnboarding();
+		} else if (homeStatus(this.settings).ok) {
+			this.promptHomeConsent();
+		}
+	}
+
+	/** Ask the user to confirm the first whole-vault push into home. */
+	promptHomeConsent(): void {
+		new HomeConsentModal(this.app, this, () =>
+			void this.confirmHomeSync()
+		).open();
+	}
+
+	/** Record consent for the current home docset and start syncing the vault. */
+	async confirmHomeSync(): Promise<void> {
+		this.settings.homeSyncConsentedFor = this.settings.homeDocset;
+		await this.saveSettings();
+		await this.rescanMappings();
+		await this.afterOnboarding();
 	}
 
 	signOut(): void {
@@ -506,17 +687,28 @@ export default class OpenLorePlugin extends Plugin {
 		this.settings.identity = "";
 		this.settings.homeDocset = "";
 		this.settings.homePath = "";
+		this.settings.homeSyncConsentedFor = "";
 		this.settings.docsets = [];
 		void this.saveSettings();
 		this.stopPullInterval();
 	}
 
-	/** Called after a successful sign-in or on load when already set up. */
+	/**
+	 * Called after a successful sign-in or on load when already set up. Syncs the
+	 * currently active mappings directly (no consent prompt here — the automatic
+	 * on-load path must never nag; whole-vault home is only included once the
+	 * user has consented, i.e. when its mapping is synthesized).
+	 */
 	async afterOnboarding(): Promise<void> {
-		if (!settingsValid(this.settings)) return;
+		if (!syncEnabled(this.settings)) return;
 		await this.rescanMappings();
 		this.restartPullInterval();
-		await this.syncNow();
+		try {
+			await this.sync.syncNow();
+			this.decorateExplorer();
+		} catch (e) {
+			console.error("OpenLore: sync failed", e);
+		}
 	}
 
 	private openOnboarding(): void {
@@ -526,7 +718,7 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private onChanged(file: TAbstractFile): void {
-		if (!settingsValid(this.settings)) return;
+		if (!syncEnabled(this.settings)) return;
 		if (!(file instanceof TFile) || file.extension !== "md") return;
 		if (!this.sync.isUnderWritable(file.path)) {
 			// Edits inside a read-only mapped folder can never be pushed. Flag
@@ -539,11 +731,88 @@ export default class OpenLorePlugin extends Plugin {
 		this.pendingPush.add(file.path);
 		this.sync.markDirty(file.path);
 		this.decorateDebounced();
-		this.flushDebounced();
+		if (this.saveRequested) {
+			// Explicit save — push now so the dirty dot clears immediately
+			// instead of lingering for the auto-sync debounce window.
+			this.saveRequested = false;
+			if (this.saveResetTimer !== null) {
+				window.clearTimeout(this.saveResetTimer);
+				this.saveResetTimer = null;
+			}
+			void this.flushPush();
+		} else {
+			this.flushDebounced();
+		}
+	}
+
+	/**
+	 * Obsidian's `modify` event fires for both its own periodic auto-save and
+	 * an explicit Cmd/Ctrl+S, so it can't distinguish them. Wrap the
+	 * `editor:save-file` command to flag the next `modify` as an explicit save
+	 * so it pushes right away. Restored on unload.
+	 */
+	private hookSaveCommand(): void {
+		const commands = (
+			this.app as unknown as {
+				commands?: {
+					commands?: Record<
+						string,
+						{
+							callback?: () => unknown;
+							checkCallback?: (checking: boolean) => unknown;
+						}
+					>;
+				};
+			}
+		).commands?.commands;
+		const cmd = commands?.["editor:save-file"];
+		if (!cmd) return;
+
+		const onSave = (): void => {
+			this.saveRequested = true;
+			// Clear the flag if no modify follows (e.g. nothing changed) so a
+			// later unrelated background write isn't mistaken for a save.
+			if (this.saveResetTimer !== null) {
+				window.clearTimeout(this.saveResetTimer);
+			}
+			this.saveResetTimer = window.setTimeout(() => {
+				this.saveRequested = false;
+				this.saveResetTimer = null;
+			}, 1000);
+		};
+
+		if (cmd.checkCallback) {
+			const orig = cmd.checkCallback.bind(cmd);
+			cmd.checkCallback = (checking: boolean) => {
+				if (!checking) onSave();
+				return orig(checking);
+			};
+			this.restoreSaveCommand = () => {
+				cmd.checkCallback = orig;
+			};
+		} else if (cmd.callback) {
+			const orig = cmd.callback.bind(cmd);
+			cmd.callback = () => {
+				onSave();
+				return orig();
+			};
+			this.restoreSaveCommand = () => {
+				cmd.callback = orig;
+			};
+		}
 	}
 
 	private onDeleted(file: TAbstractFile): void {
-		if (!settingsValid(this.settings)) return;
+		if (!syncEnabled(this.settings)) return;
+		if (file instanceof TFolder) {
+			// Set the guard before any await so per-child delete events (emitted
+			// by some Obsidian versions) are suppressed while we reconcile.
+			this.deletingFolders.add(file.path);
+			void this.onFolderDeleted(file.path);
+			return;
+		}
+		if (!(file instanceof TFile)) return;
+		if (this.isUnderDeletingFolder(file.path)) return;
 		if (!this.sync.isUnderWritable(file.path)) return;
 		void this.sync
 			.deleteRemote(file.path)
@@ -559,19 +828,100 @@ export default class OpenLorePlugin extends Plugin {
 
 	private onRenamed(file: TAbstractFile, oldPath: string): void {
 		if (file instanceof TFolder) {
-			// A mapped folder (or one containing one) moved; its Lorefile moved
-			// with it, so just re-resolve mappings and re-badge.
-			void this.rescanMappings().then(() => this.decorateExplorer());
+			// Guard synchronously before the follow-up child rename events fire,
+			// then reconcile the whole subtree from this one event.
+			this.renamingFolders.set(oldPath, file.path);
+			void this.onFolderRenamed(oldPath, file.path);
 			return;
 		}
-		if (!settingsValid(this.settings)) return;
+		if (!(file instanceof TFile)) return;
+		// A descendant event from a folder move — the folder handler reconciles
+		// the subtree as a batch, so ignore the per-child event here.
+		if (this.isUnderRenamingFolder(oldPath)) return;
+		if (!syncEnabled(this.settings)) return;
 		if (this.sync.isUnderWritable(oldPath)) {
 			void this.sync.deleteRemote(oldPath).catch(() => {});
 		}
-		if (file instanceof TFile) this.onChanged(file);
+		this.onChanged(file);
+	}
+
+	/** Is a path inside a folder whose rename we're currently reconciling? */
+	private isUnderRenamingFolder(path: string): boolean {
+		for (const from of this.renamingFolders.keys()) {
+			if (path === from || path.startsWith(from + "/")) return true;
+		}
+		return false;
+	}
+
+	/** Is a path inside a folder whose deletion we're currently reconciling? */
+	private isUnderDeletingFolder(path: string): boolean {
+		for (const from of this.deletingFolders) {
+			if (path === from || path.startsWith(from + "/")) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Reconcile a folder move. Files carried home-owned notes need their stale
+	 * copies removed from the old home path and fresh copies pushed at the new
+	 * path; carve-out folders take their `.lore` with them, so their remote
+	 * paths are unchanged and only need re-resolving.
+	 */
+	private async onFolderRenamed(oldPath: string, newPath: string): Promise<void> {
+		try {
+			await this.rescanMappings();
+			if (syncEnabled(this.settings)) {
+				await this.sync.renameFolder(oldPath, newPath);
+			}
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			console.error("OpenLore: folder rename sync failed", e);
+			this.showNotice(
+				`OpenLore: failed to sync move of ${oldPath} — ${msg}`
+			);
+		} finally {
+			this.renamingFolders.delete(oldPath);
+			this.decorateExplorer();
+		}
+	}
+
+	/**
+	 * Reconcile a folder deletion. For a home-owned folder (or a subfolder of a
+	 * writable carve-out) we delete the server copies under it. Deleting a
+	 * carve-out root only unmaps it locally — a shared docset is never wiped by
+	 * removing its local mirror.
+	 */
+	private async onFolderDeleted(folderPath: string): Promise<void> {
+		try {
+			const owner = this.sync.mappingFor(folderPath);
+			const isCarveOutRoot =
+				!!owner && !owner.isHome && owner.vaultPath === folderPath;
+			if (!isCarveOutRoot) {
+				const n = await this.sync.deleteRemoteFolder(folderPath);
+				if (n > 0) {
+					console.log(
+						`OpenLore: deleted ${n} remote file(s) under ${folderPath}`
+					);
+				}
+			}
+			await this.rescanMappings();
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			console.error("OpenLore: folder delete sync failed", e);
+			this.showNotice(
+				`OpenLore: failed to sync deletion of ${folderPath} — ${msg}`
+			);
+		} finally {
+			this.deletingFolders.delete(folderPath);
+			this.decorateExplorer();
+		}
 	}
 
 	private async flushPush(): Promise<void> {
+		if (!syncEnabled(this.settings)) {
+			this.pendingPush.clear();
+			return;
+		}
 		if (this.pendingPush.size === 0) return;
 		const paths = Array.from(this.pendingPush);
 		this.pendingPush.clear();
@@ -622,9 +972,19 @@ export default class OpenLorePlugin extends Plugin {
 			this.openOnboarding();
 			return;
 		}
-		if (!settingsValid(this.settings)) {
-			this.showNotice("OpenLore: sign in to sync.");
+		if (!syncEnabled(this.settings)) {
+			this.showNotice(
+				settingsValid(this.settings)
+					? `OpenLore: ${homeStatusMessage(homeStatus(this.settings))}`
+					: "OpenLore: sign in to sync."
+			);
 			void this.activateSidebarView();
+			return;
+		}
+		// Home is selected and writable but the whole-vault upload hasn't been
+		// confirmed yet — ask before pushing anything.
+		if (!homeSyncActive(this.settings)) {
+			this.promptHomeConsent();
 			return;
 		}
 		try {

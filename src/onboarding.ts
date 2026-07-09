@@ -1,16 +1,20 @@
 import { App, Modal, Setting } from "obsidian";
 import type OpenLorePlugin from "../main";
+import { homeCandidates, homeStatus, settingsValid } from "./types";
 
 /**
- * Branded first-run setup: enter the lore server, then sign in through the
- * server's passkey login in your browser (OAuth authorization-code + PKCE).
- * On success the plugin fetches your docsets and finds your home folder.
+ * Branded first-run setup, in two steps:
+ *  1. Enter the lore server and sign in through the server's passkey login in
+ *     your browser (OAuth authorization-code + PKCE).
+ *  2. Choose your home folder — a read/write docset that your whole vault syncs
+ *     up to. Sync stays disabled until a writable home is selected.
  */
 export class OnboardingModal extends Modal {
 	private serverUrl: string;
 	private busy = false;
+	private noIdentity = false;
+	private homeChoice = "";
 	private status?: HTMLElement;
-	private banner?: HTMLElement;
 
 	constructor(
 		app: App,
@@ -22,6 +26,21 @@ export class OnboardingModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.render();
+	}
+
+	/** Show the step that matches the current state, or finish when ready. */
+	private render(): void {
+		const s = this.plugin.settings;
+		if (!settingsValid(s)) return this.renderSignIn();
+		if (!homeStatus(s).ok) return this.renderHome();
+		this.close();
+		this.onDone();
+	}
+
+	// ---- Step 1: sign in ----
+
+	private renderSignIn(): void {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass("openlore-onboarding");
@@ -46,6 +65,16 @@ export class OnboardingModal extends Modal {
 
 		this.status = contentEl.createDiv({ cls: "openlore-onboarding-status" });
 
+		if (this.noIdentity) {
+			this.renderBanner(
+				"Signed in without an identity",
+				"Your passkey isn't bound to an OpenLore identity, so the server " +
+					"issued an anonymous token. On the server, register a passkey " +
+					"for your identity with `passkey register --identity <name>`, " +
+					"then sign in again."
+			);
+		}
+
 		new Setting(contentEl).addButton((b) =>
 			b
 				.setButtonText("Sign in with OpenLore")
@@ -54,39 +83,24 @@ export class OnboardingModal extends Modal {
 		);
 	}
 
-	private setStatus(msg: string, error = false): void {
-		if (!this.status) return;
-		this.status.setText(msg);
-		this.status.toggleClass("is-error", error);
-	}
-
 	private async signIn(): Promise<void> {
 		if (this.busy) return;
 		this.serverUrl = this.serverUrl.trim().replace(/\/+$/, "");
 		if (!this.serverUrl) return this.setStatus("Enter the server URL.", true);
 
-		this.clearBanner();
+		this.noIdentity = false;
 		this.busy = true;
 		this.setStatus("Opening your browser to sign in…");
 		try {
 			await this.plugin.signIn(this.serverUrl);
 			this.busy = false;
-			const s = this.plugin.settings;
-			if (!s.identity) {
-				this.setStatus("");
-				this.renderBanner(
-					"Signed in without an identity",
-					"Your passkey isn't bound to an OpenLore identity, so the server " +
-						"issued an anonymous token. On the server, register a passkey " +
-						"for your identity with `passkey register --identity <name>`, " +
-						"then sign in again."
-				);
+			if (!this.plugin.settings.identity) {
+				this.noIdentity = true;
+				this.renderSignIn();
 				return;
 			}
-			// Signed in. Folder syncing is opt-in — the panel lets you map
-			// docsets into vault folders next.
-			this.close();
-			this.onDone();
+			// Signed in — advance to home selection.
+			this.render();
 		} catch (e) {
 			this.busy = false;
 			const msg = e instanceof Error ? e.message : "sign-in failed";
@@ -94,17 +108,95 @@ export class OnboardingModal extends Modal {
 		}
 	}
 
-	private clearBanner(): void {
-		this.banner?.remove();
-		this.banner = undefined;
+	// ---- Step 2: choose home folder ----
+
+	private renderHome(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass("openlore-onboarding");
+
+		const brand = contentEl.createDiv({ cls: "openlore-brand" });
+		brand.createSpan({ cls: "openlore-brand-mark", text: "🏠" });
+		brand.createEl("h2", { text: "Choose your home folder" });
+		contentEl.createEl("p", {
+			cls: "openlore-brand-sub",
+			text: "Your vault syncs up to this folder so your agents can read it. It must be read/write.",
+		});
+
+		if (this.plugin.isObsidianSyncActive()) {
+			this.renderBanner(
+				"Obsidian Sync is on",
+				"Obsidian Sync and OpenLore must not sync the same files, or you " +
+					"risk conflicts and data loss. After setup, exclude your OpenLore " +
+					"folders in Settings → Sync → Excluded folders (or use only one " +
+					"service on any given folder)."
+			);
+		}
+
+		const candidates = homeCandidates(this.plugin.settings.docsets);
+		if (candidates.length === 0) {
+			this.renderBanner(
+				"No writable docsets",
+				"You don't have write access to any docsets, so there's nowhere to " +
+					"put your home folder. Ask your server admin to grant you a " +
+					"read/write docset, then reopen setup."
+			);
+			return;
+		}
+
+		if (!candidates.some((d) => d.name === this.homeChoice)) {
+			this.homeChoice = candidates[0].name;
+		}
+
+		new Setting(contentEl)
+			.setName("Home folder")
+			.setDesc("The read/write docset your vault syncs to")
+			.addDropdown((d) => {
+				for (const ds of candidates) d.addOption(ds.name, ds.name);
+				d.setValue(this.homeChoice);
+				d.onChange((v) => (this.homeChoice = v));
+			});
+
+		this.status = contentEl.createDiv({ cls: "openlore-onboarding-status" });
+
+		new Setting(contentEl).addButton((b) =>
+			b
+				.setButtonText("Use this home folder")
+				.setCta()
+				.onClick(() => void this.confirmHome())
+		);
+	}
+
+	private async confirmHome(): Promise<void> {
+		if (this.busy) return;
+		if (!this.homeChoice) return this.setStatus("Pick a home folder.", true);
+
+		this.busy = true;
+		this.setStatus("Setting up your home folder…");
+		try {
+			await this.plugin.selectHome(this.homeChoice);
+			this.busy = false;
+			this.close();
+			this.onDone();
+		} catch (e) {
+			this.busy = false;
+			const msg = e instanceof Error ? e.message : "could not set home folder";
+			this.setStatus(msg, true);
+		}
+	}
+
+	// ---- Shared helpers ----
+
+	private setStatus(msg: string, error = false): void {
+		if (!this.status) return;
+		this.status.setText(msg);
+		this.status.toggleClass("is-error", error);
 	}
 
 	private renderBanner(title: string, detail: string): void {
-		this.clearBanner();
 		const b = this.contentEl.createDiv({ cls: "openlore-warning" });
 		b.createDiv({ cls: "openlore-warning-title", text: `⚠ ${title}` });
 		b.createDiv({ cls: "openlore-warning-body", text: detail });
-		this.banner = b;
 	}
 
 	onClose(): void {

@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type OpenLorePlugin from "../main";
+import { homeCandidates, homeStatus, homeStatusMessage } from "./types";
 
 /**
  * Native Obsidian settings tab for OpenLore. Hosts connection and sync
@@ -26,6 +27,47 @@ export class OpenLoreSettingTab extends PluginSettingTab {
 				await this.plugin.saveSettings();
 			})
 		);
+
+		new Setting(containerEl).setName("Home").setHeading();
+
+		const candidates = homeCandidates(s.docsets);
+		const homeSetting = new Setting(containerEl)
+			.setName("Home folder")
+			.setDesc(
+				"The read/write docset your whole vault syncs to. Sync stays disabled until this is set."
+			);
+
+		if (candidates.length === 0) {
+			homeSetting.descEl.createDiv({
+				cls: "openlore-status-err",
+				text: "No read/write docsets available. Ask your admin for write access.",
+			});
+		} else {
+			homeSetting.addDropdown((d) => {
+				d.addOption("", "— select —");
+				let hasCurrent = false;
+				for (const ds of candidates) {
+					d.addOption(ds.name, ds.name);
+					if (ds.name === s.homeDocset) hasCurrent = true;
+				}
+				// Keep a stale/unavailable selection visible so the user sees it.
+				if (s.homeDocset && !hasCurrent) {
+					d.addOption(s.homeDocset, `${s.homeDocset} (unavailable)`);
+				}
+				d.setValue(s.homeDocset);
+				d.onChange(async (v) => {
+					if (v) await this.plugin.selectHome(v);
+				});
+			});
+		}
+
+		const st = homeStatus(s);
+		if (!st.ok && s.homeDocset) {
+			homeSetting.descEl.createDiv({
+				cls: "openlore-status-err",
+				text: homeStatusMessage(st),
+			});
+		}
 
 		new Setting(containerEl).setName("Sync").setHeading();
 

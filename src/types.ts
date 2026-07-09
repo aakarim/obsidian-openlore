@@ -24,6 +24,11 @@ export interface ResolvedMapping extends FolderMapping {
 	mount: string;
 	/** Direct writability of the docset, or "r" if unknown. */
 	access: "r" | "rw";
+	/**
+	 * The implicit whole-vault home mapping (vaultPath ""). Set only for the
+	 * synthesized root→home docset mapping, never for `.lore`-backed folders.
+	 */
+	isHome?: boolean;
 }
 
 /** Plugin settings persisted to data.json. */
@@ -38,10 +43,16 @@ export interface OpenLoreSettings {
 	tokenExpiresAt: number;
 	/** Signed-in identity (`sub` from the token). */
 	identity: string;
-	/** Name of the docset carrying the `home` attribute (your folder). */
+	/** Name of the docset you selected as your home folder. Must be writable. */
 	homeDocset: string;
-	/** Primary virtual path of the home docset ($HOME on the server). */
+	/** Primary virtual path of the selected home docset ($HOME on the server). */
 	homePath: string;
+	/**
+	 * The home docset name the user consented to sync their whole vault into.
+	 * Whole-vault push only turns on when this equals `homeDocset` — so changing
+	 * home requires re-consent before anything is uploaded to the new docset.
+	 */
+	homeSyncConsentedFor: string;
 	/** Cached docset list from the last `lore docsets`. */
 	docsets: DocsetRow[];
 	/** Default base folder suggested when mapping a new docset. */
@@ -62,6 +73,7 @@ export const DEFAULT_SETTINGS: OpenLoreSettings = {
 	identity: "",
 	homeDocset: "",
 	homePath: "",
+	homeSyncConsentedFor: "",
 	docsets: [],
 	vaultRoot: "OpenLore",
 	pullIntervalMinutes: 5,
@@ -98,15 +110,10 @@ export function parseDocsets(output: string): DocsetRow[] {
 	return rows;
 }
 
-/** The docset marked `home`, if any. */
-export function homeDocsetOf(docsets: DocsetRow[]): DocsetRow | undefined {
-	return docsets.find((d) => d.attributes.includes("home"));
-}
-
 /**
- * A usable connection: signed in with a real identity. Syncing is opt-in per
- * folder, so a home docset is no longer required — nothing syncs until the user
- * maps a folder.
+ * A usable connection: signed in with a real identity. This gates whether the
+ * user can map folders / pick a home; it does NOT by itself enable sync (see
+ * `syncEnabled`, which additionally requires a writable home folder).
  */
 export function settingsValid(s: OpenLoreSettings): boolean {
 	return (
@@ -114,4 +121,57 @@ export function settingsValid(s: OpenLoreSettings): boolean {
 		s.accessToken.trim().length > 0 &&
 		s.identity.trim().length > 0
 	);
+}
+
+/** The state of the user's selected home folder, with a reason when unusable. */
+export type HomeStatus =
+	| { ok: true; docset: DocsetRow }
+	| { ok: false; reason: "unset" | "missing" | "readonly"; name?: string };
+
+/**
+ * Resolve the selected home docset against the current docset list. Home is
+ * user-selected (not derived from any attribute) and MUST be writable: the
+ * whole vault is pushed up to it, so a read-only or missing home is an error.
+ */
+export function homeStatus(s: OpenLoreSettings): HomeStatus {
+	if (!s.homeDocset) return { ok: false, reason: "unset" };
+	const d = s.docsets.find((x) => x.name === s.homeDocset);
+	if (!d) return { ok: false, reason: "missing", name: s.homeDocset };
+	if (d.access !== "rw") return { ok: false, reason: "readonly", name: s.homeDocset };
+	return { ok: true, docset: d };
+}
+
+/** Human-readable message for a non-ok home status. */
+export function homeStatusMessage(st: HomeStatus): string {
+	if (st.ok) return "";
+	switch (st.reason) {
+		case "unset":
+			return "Select a home folder (a read/write docset) to enable sync.";
+		case "missing":
+			return `Your home folder "${st.name}" is unavailable. Select another.`;
+		case "readonly":
+			return `Your home folder "${st.name}" is read-only. OpenLore needs read/write access to sync. Pick a read/write docset or ask your admin.`;
+	}
+}
+
+/**
+ * Sync is enabled only when signed in AND a writable home folder is selected.
+ * When this is false, nothing syncs at all — not home, not mapped folders.
+ */
+export function syncEnabled(s: OpenLoreSettings): boolean {
+	return settingsValid(s) && homeStatus(s).ok;
+}
+
+/**
+ * Whether whole-vault → home push is live: a writable home is selected AND the
+ * user has consented to sync into that specific docset. Until then the vault
+ * root is not pushed (mapped carve-out folders can still sync).
+ */
+export function homeSyncActive(s: OpenLoreSettings): boolean {
+	return homeStatus(s).ok && s.homeSyncConsentedFor === s.homeDocset;
+}
+
+/** Docsets the user could pick as home: writable and mounted. */
+export function homeCandidates(docsets: DocsetRow[]): DocsetRow[] {
+	return docsets.filter((d) => d.access === "rw" && d.paths.length > 0);
 }

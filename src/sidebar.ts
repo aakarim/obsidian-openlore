@@ -1,6 +1,11 @@
 import { ItemView, WorkspaceLeaf, setIcon, Setting, Notice } from "obsidian";
 import type OpenLorePlugin from "../main";
-import { settingsValid } from "./types";
+import {
+	homeStatus,
+	homeStatusMessage,
+	homeSyncActive,
+	syncEnabled,
+} from "./types";
 import { OnboardingModal } from "./onboarding";
 import { MapFolderModal } from "./map-folder";
 
@@ -132,8 +137,33 @@ export class OpenLoreSidebarView extends ItemView {
 			cls: "openlore-status-sub",
 			text: s.identity || "(not signed in)",
 		});
+		if (s.identity) {
+			const home = homeStatus(s);
+			if (home.ok) {
+				box.createDiv({
+					cls: "openlore-status-sub",
+					text: homeSyncActive(s)
+						? `Home: ${home.docset.name}`
+						: `Home: ${home.docset.name} (upload not confirmed)`,
+				});
+			} else {
+				box.createDiv({
+					cls: "openlore-status-err",
+					text: homeStatusMessage(home),
+				});
+			}
+		}
 		if (this.error) {
 			box.createDiv({ cls: "openlore-status-err", text: this.error });
+		}
+		if (s.identity && this.plugin.isObsidianSyncActive()) {
+			box.createDiv({
+				cls: "openlore-status-err",
+				text:
+					"⚠ Obsidian Sync is on. Don't let it and OpenLore cover the same " +
+					"files — exclude your OpenLore folders in Settings → Sync → " +
+					"Excluded folders to avoid conflicts and data loss.",
+			});
 		}
 		if (this.plugin.sync.lastSync) {
 			box.createDiv({
@@ -151,7 +181,7 @@ export class OpenLoreSidebarView extends ItemView {
 			cls: "mod-cta",
 			text: "Sync now",
 		});
-		syncBtn.disabled = !settingsValid(s);
+		syncBtn.disabled = !syncEnabled(s);
 		syncBtn.addEventListener("click", async () => {
 			syncBtn.disabled = true;
 			syncBtn.textContent = "Syncing…";
@@ -180,10 +210,14 @@ export class OpenLoreSidebarView extends ItemView {
 			attr: { "aria-label": "Add folder" },
 		});
 		setIcon(addBtn, "plus");
-		addBtn.toggleAttribute("disabled", !settingsValid(s));
+		addBtn.toggleAttribute("disabled", !syncEnabled(s));
 		addBtn.addEventListener("click", () => this.openMapFolder());
 
-		if (this.plugin.mappings.length === 0) {
+		// The whole-vault home mapping is shown in the status section and can't
+		// be unmapped here — only explicit carve-out (`.lore`) folders are
+		// listed as removable synced folders.
+		const mappings = this.plugin.mappings.filter((m) => !m.isHome);
+		if (mappings.length === 0) {
 			el.createDiv({
 				cls: "openlore-empty",
 				text: "No folders synced yet. Add one to start.",
@@ -192,7 +226,7 @@ export class OpenLoreSidebarView extends ItemView {
 		}
 
 		const list = el.createDiv({ cls: "openlore-list" });
-		for (const m of this.plugin.mappings) {
+		for (const m of mappings) {
 			const item = list.createDiv({ cls: "openlore-item openlore-map-item" });
 			const info = item.createDiv({ cls: "openlore-map-info" });
 			info.createSpan({ cls: "openlore-claim", text: m.vaultPath });
