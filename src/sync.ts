@@ -392,6 +392,15 @@ export class SyncEngine {
 		const writable = m.access === "rw";
 
 		let written = 0;
+		// Case-insensitive index of vault files. On macOS/Windows the local FS
+		// folds case, so a remote "Notes/Foo.md" and an on-disk "notes/foo.md"
+		// are the same file even though Obsidian's cache keys are case-sensitive.
+		// Resolving through this index lets the no-clobber and skip logic below
+		// recognise the existing file instead of trying to re-create it.
+		const byLower = new Map<string, TFile>();
+		for (const f of this.plugin.app.vault.getFiles()) {
+			byLower.set(f.path.toLowerCase(), f);
+		}
 		const files = await this.plugin.api.listFiles(mountRoot);
 		for (const vfsPath of files) {
 			if (!vfsPath.startsWith(mountRoot)) continue;
@@ -412,8 +421,15 @@ export class SyncEngine {
 			if (owner && owner !== m) continue;
 
 			const key = this.toVfs(m, localPath);
-			const existing =
+			const exact =
 				this.plugin.app.vault.getAbstractFileByPath(localPath);
+			const existing: TFile | null =
+				exact instanceof TFile
+					? exact
+					: (byLower.get(localPath.toLowerCase()) ?? null);
+			// Write to the existing file's real (possibly differently-cased)
+			// path so we update it in place instead of forking a case variant.
+			const writePath = existing ? existing.path : localPath;
 			const content = await this.plugin.api.readFile(vfsPath);
 
 			if (existing instanceof TFile) {
@@ -445,7 +461,14 @@ export class SyncEngine {
 			this.setHash(key, hash(content));
 			this.dirtyPaths.delete(localPath);
 			this.errorPaths.delete(localPath);
-			await this.writeVaultFile(localPath, content);
+			await this.writeVaultFile(writePath, content);
+			// Keep the index current so a later case-variant in this same pull
+			// resolves to the file we just wrote rather than re-creating it.
+			const created =
+				this.plugin.app.vault.getAbstractFileByPath(writePath);
+			if (created instanceof TFile) {
+				byLower.set(writePath.toLowerCase(), created);
+			}
 			written++;
 		}
 		return written;
@@ -477,13 +500,40 @@ export class SyncEngine {
 	}
 
 	private async writeVaultFile(path: string, content: string): Promise<void> {
-		const existing = this.plugin.app.vault.getAbstractFileByPath(path);
+		const vault = this.plugin.app.vault;
+		const existing = vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) {
-			await this.plugin.app.vault.modify(existing, content);
+			await vault.modify(existing, content);
 			return;
 		}
 		await this.ensureFolder(path.substring(0, path.lastIndexOf("/")));
-		await this.plugin.app.vault.create(path, content);
+		try {
+			await vault.create(path, content);
+		} catch (e) {
+			// `create` throws "File already exists" when the file is on disk but
+			// not (yet) in Obsidian's cache — a common race during bulk pulls, or
+			// a note created outside Obsidian. Re-resolve and modify, or fall back
+			// to a direct adapter write, instead of failing the whole sync.
+			const again = vault.getAbstractFileByPath(path);
+			if (again instanceof TFile) {
+				await vault.modify(again, content);
+				return;
+			}
+			// Case-insensitive filesystem (macOS/Windows): the file exists at a
+			// differently-cased path that the case-sensitive cache lookup above
+			// missed. Modify the real file in place rather than forking a variant.
+			const lower = path.toLowerCase();
+			const ci = vault.getFiles().find((f) => f.path.toLowerCase() === lower);
+			if (ci) {
+				await vault.modify(ci, content);
+				return;
+			}
+			if (await vault.adapter.exists(path)) {
+				await vault.adapter.write(path, content);
+				return;
+			}
+			throw e;
+		}
 	}
 
 	private async ensureFolder(dir: string): Promise<void> {

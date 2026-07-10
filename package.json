@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-openlore",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "OpenLore Obsidian plugin — sync vault insights to your personal space",
 	"main": "main.js",
 	"scripts": {

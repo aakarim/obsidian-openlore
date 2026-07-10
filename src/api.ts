@@ -4,6 +4,15 @@ import { DocsetRow, parseDocsets } from "./types";
 /** Thrown when the server rejects the bearer token even after a refresh. */
 export class UnauthorizedError extends Error {}
 
+/**
+ * Thrown for failures that are worth retrying: network errors and 5xx/429
+ * server responses. Deterministic failures (4xx, command errors) are never
+ * wrapped in this, so they surface immediately.
+ */
+export class TransientError extends Error {}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export interface ApiConfig {
 	serverUrl: string;
 	/** Returns the current access token. */
@@ -35,18 +44,54 @@ export class OpenLoreAPI {
 		return this.cfg.serverUrl.replace(/\/+$/, "");
 	}
 
-	/** Run one shell command, refreshing the token once on a 401. */
+	/**
+	 * Run one shell command, retrying transient (network / 5xx / 429) failures
+	 * with exponential backoff. Auth failures and deterministic command errors
+	 * are not retried.
+	 */
 	async shell(command: string): Promise<ShellResult> {
-		let res = await this.rawShell(command, this.cfg.getToken());
+		// Delays applied before attempts 2, 3, 4 (with small jitter).
+		const backoff = [300, 900, 2500];
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await this.shellOnce(command);
+			} catch (e) {
+				if (!(e instanceof TransientError) || attempt >= backoff.length) {
+					throw e;
+				}
+				await sleep(backoff[attempt] + Math.floor(Math.random() * 200));
+			}
+		}
+	}
+
+	private async shellOnce(command: string): Promise<ShellResult> {
+		let res: Awaited<ReturnType<typeof this.rawShell>>;
+		try {
+			res = await this.rawShell(command, this.cfg.getToken());
+		} catch (e) {
+			// requestUrl throws on network-level failures even with throw:false.
+			throw new TransientError(e instanceof Error ? e.message : "network error");
+		}
 		if (res.status === 401) {
 			const token = await this.cfg.refresh();
 			if (!token) {
 				throw new UnauthorizedError("Sign in to OpenLore again.");
 			}
-			res = await this.rawShell(command, token);
+			try {
+				res = await this.rawShell(command, token);
+			} catch (e) {
+				throw new TransientError(
+					e instanceof Error ? e.message : "network error",
+				);
+			}
 			if (res.status === 401) {
 				throw new UnauthorizedError("Sign in to OpenLore again.");
 			}
+		}
+		if (res.status >= 500 || res.status === 429) {
+			throw new TransientError(
+				`shell ${res.status}: ${res.text || "server error"}`,
+			);
 		}
 		if (res.status < 200 || res.status >= 300) {
 			throw new Error(`shell ${res.status}: ${res.text || "request failed"}`);
