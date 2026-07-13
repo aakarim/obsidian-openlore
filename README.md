@@ -67,12 +67,14 @@ and enter this repository URL.
 
 Re-sign in or sign out any time from the OpenLore panel.
 
-> **Desktop only.** The plugin registers the `obsidian://openlore-auth` callback
-> for the OAuth redirect.
+> **Desktop and mobile.** The plugin registers the
+> `obsidian://openlore-auth` callback for the OAuth redirect. On mobile, sync
+> runs while Obsidian is open; mobile operating systems may suspend it in the
+> background.
 
-> **Per-vault settings.** Sign-in and server settings are stored in each vault's
-> `.obsidian/openlore.json`, so different vaults can point at different lore
-> servers — even when the plugin folder is symlinked across vaults.
+> **Per-vault settings.** Sign-in and server settings are stored in device-local
+> IndexedDB, namespaced by vault. They are not copied through Obsidian Sync, and
+> different vaults can point at different lore servers.
 
 ## The OpenLore panel
 

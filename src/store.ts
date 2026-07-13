@@ -11,6 +11,7 @@ const STORE = "kv";
 /** Object-store keys. */
 export const SYNC_STATE_KEY = "sync-state";
 export const SETTINGS_KEY = "settings";
+export const PENDING_AUTH_KEY = "pending-auth";
 
 /**
  * A stored value tagged with a monotonically increasing data-schema version.

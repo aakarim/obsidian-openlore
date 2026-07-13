@@ -1,6 +1,7 @@
 import {
 	Menu,
 	Notice,
+	Platform,
 	Plugin,
 	TFile,
 	TFolder,
@@ -27,7 +28,12 @@ import {
 	syncEnabled,
 } from "./src/types";
 import { HomeConsentModal } from "./src/home-consent";
-import { KVStore, SETTINGS_KEY, Versioned } from "./src/store";
+import {
+	KVStore,
+	PENDING_AUTH_KEY,
+	SETTINGS_KEY,
+	Versioned,
+} from "./src/store";
 import {
 	buildAuthorizeUrl,
 	createPkce,
@@ -44,6 +50,7 @@ import {
 const BADGE_CLASS = "openlore-tree-badge";
 const DIRTY_CLASS = "openlore-dirty-dot";
 const ERROR_CLASS = "openlore-error-dot";
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Data-schema version of the persisted settings. Monotonically increasing; bump
@@ -60,10 +67,17 @@ function migrateSettings(stored: Versioned<OpenLoreSettings>): OpenLoreSettings 
 interface PendingAuth {
 	verifier: string;
 	state: string;
+	serverUrl: string;
+	createdAt: number;
 	resolve: () => void;
 	reject: (e: Error) => void;
 	timer: number;
 }
+
+type StoredPendingAuth = Pick<
+	PendingAuth,
+	"verifier" | "state" | "serverUrl" | "createdAt"
+>;
 
 export default class OpenLorePlugin extends Plugin {
 	settings: OpenLoreSettings = DEFAULT_SETTINGS;
@@ -475,12 +489,14 @@ export default class OpenLorePlugin extends Plugin {
 							.setIcon("refresh-cw")
 							.onClick(() => void this.syncNow())
 					);
-					menu.addItem((item) =>
-						item
-							.setTitle("Open console")
-							.setIcon("terminal")
-							.onClick(() => this.openConsole())
-					);
+					if (Platform.isDesktopApp) {
+						menu.addItem((item) =>
+							item
+								.setTitle("Open console")
+								.setIcon("terminal")
+								.onClick(() => this.openConsole())
+						);
+					}
 					menu.showAtMouseEvent(evt);
 				});
 			}
@@ -551,15 +567,22 @@ export default class OpenLorePlugin extends Plugin {
 
 		const { verifier, challenge } = await createPkce();
 		const state = randomState();
+		const createdAt = Date.now();
+		const stored: StoredPendingAuth = { verifier, state, serverUrl: url, createdAt };
+		await this.store.set<Versioned<StoredPendingAuth>>(PENDING_AUTH_KEY, {
+			v: 1,
+			data: stored,
+		});
 
 		const done = new Promise<void>((resolve, reject) => {
 			const timer = window.setTimeout(() => {
 				if (this.pendingAuth) {
 					this.pendingAuth = null;
+					void this.store.delete(PENDING_AUTH_KEY);
 					reject(new Error("Sign-in timed out."));
 				}
-			}, 5 * 60 * 1000);
-			this.pendingAuth = { verifier, state, resolve, reject, timer };
+			}, AUTH_TIMEOUT_MS);
+			this.pendingAuth = { ...stored, resolve, reject, timer };
 		});
 
 		window.open(buildAuthorizeUrl(url, state, challenge), "_blank");
@@ -569,25 +592,36 @@ export default class OpenLorePlugin extends Plugin {
 	private async handleAuthCallback(
 		params: Record<string, string>
 	): Promise<void> {
-		const pending = this.pendingAuth;
-		if (!pending) return;
+		const live = this.pendingAuth;
 		this.pendingAuth = null;
-		window.clearTimeout(pending.timer);
+		if (live) window.clearTimeout(live.timer);
 
 		try {
+			const stored = live
+				? live
+				: (
+						await this.store.get<Versioned<StoredPendingAuth>>(
+							PENDING_AUTH_KEY
+						)
+					)?.data;
+			await this.store.delete(PENDING_AUTH_KEY);
+			if (!stored || Date.now() - stored.createdAt > AUTH_TIMEOUT_MS) {
+				throw new Error("Sign-in expired. Start sign-in again.");
+			}
 			if (params.error) {
 				throw new Error(params.error_description || params.error);
 			}
 			if (!params.code) throw new Error("No authorization code returned.");
-			if (params.state !== pending.state) {
+			if (params.state !== stored.state) {
 				throw new Error("State mismatch — sign-in was not initiated here.");
 			}
 
 			const session = await exchangeCode(
-				this.settings.serverUrl,
+				stored.serverUrl,
 				params.code,
-				pending.verifier
+				stored.verifier
 			);
+			this.settings.serverUrl = stored.serverUrl;
 			this.settings.accessToken = session.accessToken;
 			this.settings.refreshToken = session.refreshToken;
 			this.settings.tokenExpiresAt = session.expiresAt;
@@ -597,12 +631,12 @@ export default class OpenLorePlugin extends Plugin {
 
 			await this.refreshDocsets();
 			this.showNotice(`OpenLore: signed in as ${this.settings.identity}`);
-			pending.resolve();
+			live?.resolve();
 			await this.afterOnboarding();
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : "sign-in failed";
 			this.showNotice(`OpenLore: ${msg}`);
-			pending.reject(e instanceof Error ? e : new Error(msg));
+			live?.reject(e instanceof Error ? e : new Error(msg));
 		}
 	}
 
