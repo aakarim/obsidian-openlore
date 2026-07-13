@@ -79,6 +79,8 @@ type StoredPendingAuth = Pick<
 	"verifier" | "state" | "serverUrl" | "createdAt"
 >;
 
+type PreparedAuth = StoredPendingAuth & { authorizeUrl: string };
+
 export default class OpenLorePlugin extends Plugin {
 	settings: OpenLoreSettings = DEFAULT_SETTINGS;
 	api!: OpenLoreAPI;
@@ -114,8 +116,11 @@ export default class OpenLorePlugin extends Plugin {
 	private restoreSaveCommand: (() => void) | null = null;
 	private pullIntervalId: number | null = null;
 	private pendingAuth: PendingAuth | null = null;
+	private preparedAuth: PreparedAuth | null = null;
+	private authPreparation = 0;
 	private refreshInFlight: Promise<string | null> | null = null;
 	private decorateDebounced: () => void = () => {};
+	private authRecoveryListeners = new Set<(error: string | null) => void>();
 
 	async onload(): Promise<void> {
 		this.store = new KVStore(this.app);
@@ -280,6 +285,16 @@ export default class OpenLorePlugin extends Plugin {
 
 	showNotice(message: string): void {
 		new Notice(message);
+	}
+
+	/** Notify onboarding UI when an OAuth callback outlives its original modal. */
+	onAuthRecovery(listener: (error: string | null) => void): () => void {
+		this.authRecoveryListeners.add(listener);
+		return () => this.authRecoveryListeners.delete(listener);
+	}
+
+	private notifyAuthRecovery(error: string | null): void {
+		for (const listener of this.authRecoveryListeners) listener(error);
 	}
 
 	/**
@@ -549,13 +564,15 @@ export default class OpenLorePlugin extends Plugin {
 	// ---- OAuth sign-in ----
 
 	/**
-	 * Begin the OAuth authorization-code + PKCE flow: open the server's
-	 * `/authorize` page (passkey login) in the browser and resolve once the
-	 * `obsidian://openlore-auth` callback completes the token exchange.
+	 * Prepare OAuth before the user taps the sign-in button. Mobile webviews only
+	 * allow `window.open` directly inside a user gesture, so PKCE generation and
+	 * IndexedDB writes cannot happen in `signIn` before the browser is opened.
 	 */
-	async signIn(serverUrl: string): Promise<void> {
+	async prepareSignIn(serverUrl: string): Promise<boolean> {
 		const url = serverUrl.trim().replace(/\/+$/, "");
 		if (!url) throw new Error("Enter the server URL first.");
+		const preparation = ++this.authPreparation;
+		this.preparedAuth = null;
 		this.settings.serverUrl = url;
 		await this.saveSettings();
 
@@ -569,10 +586,27 @@ export default class OpenLorePlugin extends Plugin {
 		const state = randomState();
 		const createdAt = Date.now();
 		const stored: StoredPendingAuth = { verifier, state, serverUrl: url, createdAt };
+		if (preparation !== this.authPreparation) return false;
 		await this.store.set<Versioned<StoredPendingAuth>>(PENDING_AUTH_KEY, {
 			v: 1,
 			data: stored,
 		});
+		if (preparation !== this.authPreparation) return false;
+		this.preparedAuth = {
+			...stored,
+			authorizeUrl: buildAuthorizeUrl(url, state, challenge),
+		};
+		return true;
+	}
+
+	/** Open the prepared OAuth URL synchronously, then await its callback. */
+	signIn(serverUrl: string): Promise<void> {
+		const url = serverUrl.trim().replace(/\/+$/, "");
+		const prepared = this.preparedAuth;
+		if (!prepared || prepared.serverUrl !== url) {
+			return Promise.reject(new Error("Sign-in is still preparing. Try again."));
+		}
+		this.preparedAuth = null;
 
 		const done = new Promise<void>((resolve, reject) => {
 			const timer = window.setTimeout(() => {
@@ -582,10 +616,10 @@ export default class OpenLorePlugin extends Plugin {
 					reject(new Error("Sign-in timed out."));
 				}
 			}, AUTH_TIMEOUT_MS);
-			this.pendingAuth = { ...stored, resolve, reject, timer };
+			this.pendingAuth = { ...prepared, resolve, reject, timer };
 		});
 
-		window.open(buildAuthorizeUrl(url, state, challenge), "_blank");
+		window.open(prepared.authorizeUrl, "_blank");
 		return done;
 	}
 
@@ -631,12 +665,14 @@ export default class OpenLorePlugin extends Plugin {
 
 			await this.refreshDocsets();
 			this.showNotice(`OpenLore: signed in as ${this.settings.identity}`);
-			live?.resolve();
+			if (live) live.resolve();
+			else this.notifyAuthRecovery(null);
 			await this.afterOnboarding();
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : "sign-in failed";
 			this.showNotice(`OpenLore: ${msg}`);
-			live?.reject(e instanceof Error ? e : new Error(msg));
+			if (live) live.reject(e instanceof Error ? e : new Error(msg));
+			else this.notifyAuthRecovery(msg);
 		}
 	}
 

@@ -15,6 +15,10 @@ export class OnboardingModal extends Modal {
 	private noIdentity = false;
 	private homeChoice = "";
 	private status?: HTMLElement;
+	private signInButton?: import("obsidian").ButtonComponent;
+	private preparedServerUrl = "";
+	private preparation = 0;
+	private unsubscribeAuthRecovery: (() => void) | null = null;
 
 	constructor(
 		app: App,
@@ -26,6 +30,11 @@ export class OnboardingModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.unsubscribeAuthRecovery = this.plugin.onAuthRecovery((error) => {
+			this.busy = false;
+			if (error) this.setStatus(error, true);
+			else this.render();
+		});
 		this.render();
 	}
 
@@ -60,7 +69,14 @@ export class OnboardingModal extends Modal {
 				t
 					.setPlaceholder("https://openlore.sh")
 					.setValue(this.serverUrl)
-					.onChange((v) => (this.serverUrl = v))
+					.onChange((v) => {
+						this.serverUrl = v;
+						this.preparedServerUrl = "";
+						this.preparation++;
+						this.signInButton
+							?.setButtonText("Prepare sign-in")
+							.setDisabled(false);
+					})
 			);
 
 		this.status = contentEl.createDiv({ cls: "openlore-onboarding-status" });
@@ -75,24 +91,54 @@ export class OnboardingModal extends Modal {
 			);
 		}
 
-		new Setting(contentEl).addButton((b) =>
+		new Setting(contentEl).addButton((b) => {
+			this.signInButton = b;
 			b
-				.setButtonText("Sign in with OpenLore")
+				.setButtonText("Prepare sign-in")
 				.setCta()
-				.onClick(() => void this.signIn())
-		);
+				.onClick(() => void this.signIn());
+		});
+	}
+
+	private async prepareSignIn(): Promise<boolean> {
+		const serverUrl = this.serverUrl.trim().replace(/\/+$/, "");
+		if (!serverUrl) {
+			this.signInButton?.setButtonText("Prepare sign-in").setDisabled(false);
+			return false;
+		}
+		const preparation = ++this.preparation;
+		this.signInButton?.setButtonText("Preparing sign-in…").setDisabled(true);
+		try {
+			const ready = await this.plugin.prepareSignIn(serverUrl);
+			if (!ready || preparation !== this.preparation) return false;
+			this.preparedServerUrl = serverUrl;
+			this.signInButton?.setButtonText("Sign in with OpenLore").setDisabled(false);
+			return true;
+		} catch (e) {
+			if (preparation !== this.preparation) return false;
+			const msg = e instanceof Error ? e.message : "could not prepare sign-in";
+			this.setStatus(msg, true);
+			this.signInButton?.setButtonText("Try again").setDisabled(false);
+			return false;
+		}
 	}
 
 	private async signIn(): Promise<void> {
 		if (this.busy) return;
 		this.serverUrl = this.serverUrl.trim().replace(/\/+$/, "");
 		if (!this.serverUrl) return this.setStatus("Enter the server URL.", true);
+		if (this.preparedServerUrl !== this.serverUrl) {
+			await this.prepareSignIn();
+			return;
+		}
 
 		this.noIdentity = false;
 		this.busy = true;
-		this.setStatus("Opening your browser to sign in…");
+		this.setStatus("Complete sign-in in your browser, then return to Obsidian…");
 		try {
-			await this.plugin.signIn(this.serverUrl);
+			// Call before the first await so window.open remains in the tap gesture.
+			const completed = this.plugin.signIn(this.serverUrl);
+			await completed;
 			this.busy = false;
 			if (!this.plugin.settings.identity) {
 				this.noIdentity = true;
@@ -200,6 +246,8 @@ export class OnboardingModal extends Modal {
 	}
 
 	onClose(): void {
+		this.unsubscribeAuthRecovery?.();
+		this.unsubscribeAuthRecovery = null;
 		this.contentEl.empty();
 	}
 }
