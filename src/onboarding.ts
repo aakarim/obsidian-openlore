@@ -94,13 +94,15 @@ export class OnboardingModal extends Modal {
 		new Setting(contentEl).addButton((b) => {
 			this.signInButton = b;
 			b
-				.setButtonText("Prepare sign-in")
+				.setButtonText("Preparing sign-in…")
 				.setCta()
+				.setDisabled(true)
 				.onClick(() => void this.signIn());
 		});
+		void this.prepareSignIn();
 	}
 
-	private async prepareSignIn(): Promise<boolean> {
+	private async prepareSignIn(replacePending = false): Promise<boolean> {
 		const serverUrl = this.serverUrl.trim().replace(/\/+$/, "");
 		if (!serverUrl) {
 			this.signInButton?.setButtonText("Prepare sign-in").setDisabled(false);
@@ -109,8 +111,12 @@ export class OnboardingModal extends Modal {
 		const preparation = ++this.preparation;
 		this.signInButton?.setButtonText("Preparing sign-in…").setDisabled(true);
 		try {
-			const ready = await this.plugin.prepareSignIn(serverUrl);
-			if (!ready || preparation !== this.preparation) return false;
+			const ready = await this.plugin.prepareSignIn(serverUrl, replacePending);
+			if (preparation !== this.preparation) return false;
+			if (!ready) {
+				this.signInButton?.setButtonText("Prepare sign-in").setDisabled(false);
+				return false;
+			}
 			this.preparedServerUrl = serverUrl;
 			this.signInButton?.setButtonText("Sign in with OpenLore").setDisabled(false);
 			return true;
@@ -128,7 +134,7 @@ export class OnboardingModal extends Modal {
 		this.serverUrl = this.serverUrl.trim().replace(/\/+$/, "");
 		if (!this.serverUrl) return this.setStatus("Enter the server URL.", true);
 		if (this.preparedServerUrl !== this.serverUrl) {
-			await this.prepareSignIn();
+			await this.prepareSignIn(true);
 			return;
 		}
 

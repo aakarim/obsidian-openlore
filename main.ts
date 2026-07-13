@@ -568,9 +568,24 @@ export default class OpenLorePlugin extends Plugin {
 	 * allow `window.open` directly inside a user gesture, so PKCE generation and
 	 * IndexedDB writes cannot happen in `signIn` before the browser is opened.
 	 */
-	async prepareSignIn(serverUrl: string): Promise<boolean> {
+	async prepareSignIn(
+		serverUrl: string,
+		replacePending = false
+	): Promise<boolean> {
 		const url = serverUrl.trim().replace(/\/+$/, "");
 		if (!url) throw new Error("Enter the server URL first.");
+		if (!replacePending && this.pendingAuth) return false;
+		if (!replacePending && this.preparedAuth?.serverUrl === url) return true;
+		if (!replacePending && !this.preparedAuth) {
+			const pending =
+				await this.store.get<Versioned<StoredPendingAuth>>(PENDING_AUTH_KEY);
+			if (
+				pending?.data &&
+				Date.now() - pending.data.createdAt <= AUTH_TIMEOUT_MS
+			) {
+				return false;
+			}
+		}
 		const preparation = ++this.authPreparation;
 		this.preparedAuth = null;
 		this.settings.serverUrl = url;
