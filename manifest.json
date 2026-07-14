@@ -1,7 +1,7 @@
 {
 	"id": "openlore",
 	"name": "OpenLore",
-	"version": "0.3.5",
+	"version": "0.3.6",
 	"minAppVersion": "1.0.0",
 	"description": "Two-way sync between your Obsidian vault and a shared OpenLore knowledge server. Read your team's folders, write your own.",
 	"author": "OpenLore",

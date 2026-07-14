@@ -156,6 +156,19 @@ export default class OpenLorePlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.decorateDebounced())
 		);
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				if (!(file instanceof TFile) || file.extension !== "md") return;
+				const vfsPath = this.sync.vfsPathFor(file.path);
+				if (!vfsPath) return;
+				menu.addItem((item) =>
+					item
+						.setTitle("Copy OpenLore web link")
+						.setIcon("link")
+						.onClick(() => void this.copyOpenLoreWebLink(vfsPath))
+				);
+			})
+		);
 		this.registerEditorExtension(createExternalLinkWarningExtension(this));
 		this.hookSaveCommand();
 
@@ -338,6 +351,20 @@ export default class OpenLorePlugin extends Plugin {
 
 	showNotice(message: string): void {
 		new Notice(message);
+	}
+
+	private async copyOpenLoreWebLink(vfsPath: string): Promise<void> {
+		const encodedPath = vfsPath
+			.split("/")
+			.map((part) => encodeURIComponent(part))
+			.join("/");
+		const link = `${this.settings.serverUrl.replace(/\/+$/, "")}/lore${encodedPath}`;
+		try {
+			await navigator.clipboard.writeText(link);
+			this.showNotice("OpenLore web link copied.");
+		} catch {
+			this.showNotice("OpenLore: couldn’t copy the web link.");
+		}
 	}
 
 	/** Notify onboarding UI when an OAuth callback outlives its original modal. */

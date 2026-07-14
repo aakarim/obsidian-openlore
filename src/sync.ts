@@ -261,6 +261,12 @@ export class SyncEngine {
 		return m.access === "rw" && m.mount ? null : m;
 	}
 
+	/** Resolve a vault path to the displayed VFS path used by OpenLore. */
+	vfsPathFor(path: string): string | null {
+		const m = this.mappingFor(path);
+		return m?.mount ? this.toVfs(m, path) : null;
+	}
+
 	/**
 	 * A local edit inside a read-only mapped folder can never be pushed. Flag it
 	 * with an error so the user isn't left wondering why it didn't sync. Returns
