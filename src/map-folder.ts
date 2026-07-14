@@ -1,6 +1,6 @@
 import { App, Modal, Setting, Notice, normalizePath } from "obsidian";
 import type OpenLorePlugin from "../main";
-import { DocsetRow } from "./types";
+import { connectableDocsets, DocsetRow } from "./types";
 
 /**
  * GUI to map a server docset into a vault folder. Pick a docset, choose where it
@@ -13,6 +13,7 @@ export class MapFolderModal extends Modal {
 	private pathEdited = false;
 	private busy = false;
 	private status?: HTMLElement;
+	private addButton?: import("obsidian").ButtonComponent;
 
 	constructor(
 		app: App,
@@ -23,6 +24,30 @@ export class MapFolderModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.contentEl.empty();
+		this.contentEl.addClass("openlore-onboarding");
+		this.contentEl.createEl("p", {
+			cls: "openlore-brand-sub",
+			text: "Loading folders…",
+		});
+		void this.load();
+	}
+
+	private async load(): Promise<void> {
+		try {
+			await this.plugin.refreshDocsets();
+			this.render();
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : "failed to load folders";
+			this.contentEl.empty();
+			this.contentEl.createEl("p", {
+				cls: "openlore-onboarding-status is-error",
+				text: msg,
+			});
+		}
+	}
+
+	private render(): void {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass("openlore-onboarding");
@@ -78,22 +103,26 @@ export class MapFolderModal extends Modal {
 
 		this.status = contentEl.createDiv({ cls: "openlore-onboarding-status" });
 
-		new Setting(contentEl).addButton((b) =>
+		new Setting(contentEl).addButton((b) => {
+			this.addButton = b;
 			b
 				.setButtonText("Add folder")
 				.setCta()
-				.onClick(() => void this.add())
-		);
+				.onClick(() => void this.add());
+		});
 	}
 
 	private available(): DocsetRow[] {
 		const taken = new Set(this.plugin.mappings.map((m) => m.docset));
-		return this.plugin.settings.docsets.filter((d) => !taken.has(d.name));
+		return connectableDocsets(this.plugin.settings.docsets, taken).filter(
+			(d) => !taken.has(d.name)
+		);
 	}
 
 	private suggestPath(ds: DocsetRow): string {
 		const base = this.plugin.settings.vaultRoot?.trim();
-		return normalizePath(base ? `${base}/${ds.name}` : ds.name);
+		const serverPath = ds.paths[0]?.replace(/^\/+|\/+$/g, "") || ds.name;
+		return normalizePath(base ? `${base}/${serverPath}` : serverPath);
 	}
 
 	private setStatus(msg: string, error = false): void {
@@ -111,6 +140,7 @@ export class MapFolderModal extends Modal {
 		}
 
 		this.busy = true;
+		this.addButton?.setDisabled(true);
 		this.setStatus("Creating folder and pulling…");
 		try {
 			await this.plugin.addMapping(this.docset, path);
@@ -119,6 +149,7 @@ export class MapFolderModal extends Modal {
 			this.onDone();
 		} catch (e) {
 			this.busy = false;
+			this.addButton?.setDisabled(false);
 			const msg = e instanceof Error ? e.message : "failed to map folder";
 			this.setStatus(msg, true);
 		}

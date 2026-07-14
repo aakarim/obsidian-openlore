@@ -88,6 +88,26 @@ is the plugin's control surface:
 - Connection settings: server URL and sign-in.
 - Sync settings: default base folder, auto-sync delay, pull interval.
 
+## Debugging
+
+**Check `/tmp/obsidian-openlore.log` first when investigating a sync problem.**
+On desktop, enable *Settings → OpenLore → Developer → Developer diagnostics*,
+reproduce the problem, then read or share the log:
+
+```bash
+cat /tmp/obsidian-openlore.log
+```
+
+The file is reset when an enabled plugin session starts. It contains JSON-lines
+events for sync lifecycle, folder mappings, file operations, local and server
+paths, byte counts, and server errors. It deliberately excludes access and
+refresh tokens, authorization headers, and note contents, so it is the preferred
+artifact to request before asking for Developer Console or Network output.
+
+Developer diagnostics are desktop-only because mobile does not expose the
+`/tmp` filesystem. If the setting was just added or updated, reload Obsidian or
+disable and re-enable the plugin before looking for it.
+
 ## Develop
 
 ```bash

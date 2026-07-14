@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Platform, PluginSettingTab, Setting } from "obsidian";
 import type OpenLorePlugin from "../main";
 import { homeCandidates, homeStatus, homeStatusMessage } from "./types";
 
@@ -30,7 +30,7 @@ export class OpenLoreSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName("Home").setHeading();
 
-		const candidates = homeCandidates(s.docsets);
+		const candidates = homeCandidates(s.docsets, s.homeDocset);
 		const homeSetting = new Setting(containerEl)
 			.setName("Home folder")
 			.setDesc(
@@ -106,6 +106,24 @@ export class OpenLoreSettingTab extends PluginSettingTab {
 						this.plugin.restartPullInterval();
 					}
 				})
+			);
+
+		new Setting(containerEl).setName("Developer").setHeading();
+
+		new Setting(containerEl)
+			.setName("Developer diagnostics")
+			.setDesc(
+				Platform.isDesktopApp
+					? `Write sanitized sync diagnostics to ${this.plugin.developerLogPath}. The log contains paths and server errors, but never tokens or note contents.`
+					: "Developer diagnostics are only available in the desktop app."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(Platform.isDesktopApp && s.developerMode)
+					.setDisabled(!Platform.isDesktopApp)
+					.onChange(async (enabled) => {
+						await this.plugin.setDeveloperMode(enabled);
+					})
 			);
 	}
 }

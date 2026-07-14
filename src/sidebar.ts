@@ -8,6 +8,7 @@ import {
 } from "./types";
 import { OnboardingModal } from "./onboarding";
 import { MapFolderModal } from "./map-folder";
+import type { SyncProgress } from "./sync";
 
 export const SIDEBAR_VIEW_TYPE = "openlore-view";
 
@@ -18,6 +19,12 @@ export const SIDEBAR_VIEW_TYPE = "openlore-view";
 export class OpenLoreSidebarView extends ItemView {
 	private status: "ok" | "error" | "loading" = "loading";
 	private error: string | null = null;
+	private progressEl: HTMLElement | null = null;
+	private errorsEl: HTMLElement | null = null;
+	private syncButton: HTMLButtonElement | null = null;
+	private unsubscribeProgress: (() => void) | null = null;
+	private unsubscribeErrors: (() => void) | null = null;
+	private errorsExpanded = false;
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -37,11 +44,21 @@ export class OpenLoreSidebarView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		this.unsubscribeProgress = this.plugin.sync.onProgress((progress) =>
+			this.updateProgress(progress)
+		);
+		this.unsubscribeErrors = this.plugin.sync.onErrorsChanged(() =>
+			this.updateErrors()
+		);
 		this.render();
 		await this.refresh();
 	}
 
 	async onClose(): Promise<void> {
+		this.unsubscribeProgress?.();
+		this.unsubscribeProgress = null;
+		this.unsubscribeErrors?.();
+		this.unsubscribeErrors = null;
 		this.contentEl.empty();
 	}
 
@@ -85,6 +102,9 @@ export class OpenLoreSidebarView extends ItemView {
 		const el = this.contentEl;
 		el.empty();
 		el.addClass("openlore-sidebar");
+		this.progressEl = null;
+		this.errorsEl = null;
+		this.syncButton = null;
 
 		const header = el.createDiv({ cls: "openlore-title-row" });
 		header.createEl("h4", { text: "OpenLore" });
@@ -113,6 +133,8 @@ export class OpenLoreSidebarView extends ItemView {
 		this.renderStatus(el);
 		this.renderActions(el);
 		this.renderMappings(el);
+		this.errorsEl = el.createDiv({ cls: "openlore-sync-errors" });
+		this.updateErrors();
 	}
 
 	private renderStatus(el: HTMLElement): void {
@@ -179,9 +201,10 @@ export class OpenLoreSidebarView extends ItemView {
 
 		const syncBtn = actions.createEl("button", {
 			cls: "mod-cta",
-			text: "Sync now",
+			text: this.plugin.sync.progress ? "Syncing…" : "Sync now",
 		});
-		syncBtn.disabled = !syncEnabled(s);
+		this.syncButton = syncBtn;
+		syncBtn.disabled = !syncEnabled(s) || this.plugin.sync.progress !== null;
 		syncBtn.addEventListener("click", async () => {
 			syncBtn.disabled = true;
 			syncBtn.textContent = "Syncing…";
@@ -198,6 +221,90 @@ export class OpenLoreSidebarView extends ItemView {
 		} else {
 			const inBtn = actions.createEl("button", { text: "Sign in" });
 			inBtn.addEventListener("click", () => this.openSetup());
+		}
+
+		this.progressEl = el.createDiv({ cls: "openlore-sync-progress" });
+		this.updateProgress(this.plugin.sync.progress);
+	}
+
+	private updateProgress(progress: SyncProgress | null): void {
+		if (this.syncButton) {
+			this.syncButton.textContent = progress ? "Syncing…" : "Sync now";
+			this.syncButton.disabled =
+				progress !== null || !syncEnabled(this.plugin.settings);
+		}
+		if (!this.progressEl) return;
+		this.progressEl.empty();
+		this.progressEl.toggleClass("is-active", progress !== null);
+		if (!progress) return;
+
+		const row = this.progressEl.createDiv({ cls: "openlore-progress-label" });
+		row.createSpan({ text: progress.phase === "pulling" ? "Pulling" : "Pushing" });
+		row.createSpan({
+			text:
+				progress.total > 0
+					? `${progress.completed} / ${progress.total}`
+					: "Preparing…",
+		});
+		const bar = this.progressEl.createEl("progress", {
+			attr: {
+				max: "100",
+				value: String(Math.max(0, Math.min(100, progress.percent))),
+				"aria-label": "OpenLore sync progress",
+			},
+		});
+		bar.value = progress.percent;
+		this.progressEl.createDiv({
+			cls: "openlore-progress-current",
+			text: progress.current,
+		});
+	}
+
+	private updateErrors(): void {
+		if (!this.errorsEl) return;
+		const errors = Array.from(this.plugin.sync.errorPaths.entries());
+		this.errorsEl.empty();
+		this.errorsEl.toggleClass("is-active", errors.length > 0);
+		if (errors.length === 0) return;
+
+		const details = this.errorsEl.createEl("details");
+		details.open = this.errorsExpanded;
+		details.addEventListener("toggle", () => {
+			this.errorsExpanded = details.open;
+		});
+		const summary = details.createEl("summary");
+		const summaryIcon = summary.createSpan({ cls: "openlore-sync-errors-icon" });
+		setIcon(summaryIcon, "circle-alert");
+		summary.createSpan({
+			cls: "openlore-sync-errors-title",
+			text: "Sync errors",
+		});
+		summary.createSpan({
+			cls: "openlore-sync-errors-count",
+			text: String(errors.length),
+			attr: {
+				"aria-label": `${errors.length} sync error${errors.length === 1 ? "" : "s"}`,
+			},
+		});
+		details.createDiv({
+			cls: "openlore-sync-errors-summary",
+			text: "These files need attention. Everything else was still processed.",
+		});
+		const list = details.createDiv({ cls: "openlore-sync-errors-list" });
+		for (const [path, message] of errors) {
+			const item = list.createDiv({ cls: "openlore-sync-error-item" });
+			const itemHeader = item.createDiv({ cls: "openlore-sync-error-header" });
+			const fileIcon = itemHeader.createSpan({ cls: "openlore-sync-error-icon" });
+			setIcon(fileIcon, "file-warning");
+			const pathButton = itemHeader.createEl("button", {
+				cls: "openlore-sync-error-path",
+				text: path,
+				attr: { title: `Open ${path}` },
+			});
+			pathButton.addEventListener("click", () => {
+				void this.app.workspace.openLinkText(path, "", false);
+			});
+			item.createDiv({ cls: "openlore-sync-error-message", text: message });
 		}
 	}
 

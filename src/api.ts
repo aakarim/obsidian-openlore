@@ -22,6 +22,7 @@ export interface ApiConfig {
 	 * new token, or null if re-auth is required. Requests are retried once.
 	 */
 	refresh: () => Promise<string | null>;
+	diagnostic?: (event: string, details?: Record<string, unknown>) => void;
 }
 
 interface ShellResult {
@@ -127,12 +128,14 @@ export class OpenLoreAPI {
 
 	/** List the docsets the identity can access. */
 	async listDocsets(): Promise<DocsetRow[]> {
+		this.cfg.diagnostic?.("api.list_docsets");
 		const { output } = await this.shell("lore docsets");
 		return parseDocsets(output);
 	}
 
 	/** List markdown files under a virtual path (recursively). */
 	async listFiles(vfsDir: string): Promise<string[]> {
+		this.cfg.diagnostic?.("api.list_files", { vfsDir });
 		const { output } = await this.shell(
 			`find ${q(vfsDir)} -type f -name '*.md'`
 		);
@@ -142,8 +145,44 @@ export class OpenLoreAPI {
 			.filter((l) => l.length > 0);
 	}
 
+	/** Return server modification times, in Unix milliseconds, for VFS paths. */
+	async fileModificationTimes(vfsPaths: string[]): Promise<Map<string, number>> {
+		this.cfg.diagnostic?.("api.file_modification_times", {
+			fileCount: vfsPaths.length,
+		});
+		const times = new Map<string, number>();
+		// Keep command lines bounded for docsets containing many files. `stat`
+		// accepts multiple paths and emits one File/Modify block for each.
+		for (let i = 0; i < vfsPaths.length; i += 50) {
+			const paths = vfsPaths.slice(i, i + 50);
+			const { output } = await this.shell(`stat ${paths.map(q).join(" ")}`);
+			let currentPath: string | null = null;
+			for (const line of output.split("\n")) {
+				const file = line.match(/^\s*File: (.*)$/);
+				if (file) {
+					currentPath = file[1];
+					continue;
+				}
+				const modified = line.match(/^Modify: (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+				if (!currentPath || !modified) continue;
+				const [, year, month, day, hour, minute, second] = modified;
+				const timestamp = new Date(
+					Number(year),
+					Number(month) - 1,
+					Number(day),
+					Number(hour),
+					Number(minute),
+					Number(second)
+				).getTime();
+				if (!Number.isNaN(timestamp)) times.set(currentPath, timestamp);
+			}
+		}
+		return times;
+	}
+
 	/** Read a file's content. */
 	async readFile(vfsPath: string): Promise<string> {
+		this.cfg.diagnostic?.("api.read_file", { vfsPath });
 		const { output } = await this.shell(`cat ${q(vfsPath)}`);
 		return output;
 	}
@@ -161,6 +200,10 @@ export class OpenLoreAPI {
 		content: string,
 		mountRoot = ""
 	): Promise<void> {
+		this.cfg.diagnostic?.("api.write_file", {
+			vfsPath,
+			contentBytes: new TextEncoder().encode(content).length,
+		});
 		const b64 = base64(content);
 		const dir = parentDir(vfsPath);
 		const root = mountRoot.replace(/\/+$/, "");
@@ -176,11 +219,13 @@ export class OpenLoreAPI {
 	 * child-file delete events can both try to remove the same path.
 	 */
 	async deleteFile(vfsPath: string): Promise<void> {
+		this.cfg.diagnostic?.("api.delete_file", { vfsPath });
 		await this.shell(`rm -f ${q(vfsPath)}`);
 	}
 
 	/** Move/rename a file (requires the server's `mv` command). */
 	async moveFile(from: string, to: string): Promise<void> {
+		this.cfg.diagnostic?.("api.move_file", { from, to });
 		await this.shell(`mv ${q(from)} ${q(to)}`);
 	}
 }

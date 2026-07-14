@@ -1,10 +1,10 @@
 /** A docset the signed-in identity can access, from `lore docsets`. */
 export interface DocsetRow {
-	/** Docset name (also the local mirror folder name). */
+	/** Docset name. */
 	name: string;
 	/** Direct filesystem writability. */
 	access: "r" | "rw";
-	/** Named attribute tokens: any of `home`, `publish`, `approval`. */
+	/** Named attribute tokens such as `home`, `inbox`, or `alias`. */
 	attributes: string[];
 	/** Display (virtual) paths mounted for this docset. */
 	paths: string[];
@@ -61,6 +61,8 @@ export interface OpenLoreSettings {
 	pullIntervalMinutes: number;
 	/** Quiet period (seconds) after edits before pushing your changes. */
 	autoSyncDelaySeconds: number;
+	/** Write sanitized sync diagnostics to /tmp on desktop. */
+	developerMode: boolean;
 	/** Whether the user has signed in at least once. */
 	onboardingComplete: boolean;
 }
@@ -78,6 +80,7 @@ export const DEFAULT_SETTINGS: OpenLoreSettings = {
 	vaultRoot: "OpenLore",
 	pullIntervalMinutes: 5,
 	autoSyncDelaySeconds: 5,
+	developerMode: false,
 	onboardingComplete: false,
 };
 
@@ -108,6 +111,35 @@ export function parseDocsets(output: string): DocsetRow[] {
 		});
 	}
 	return rows;
+}
+
+/**
+ * Docsets offered for a new connection. Alias mounts are implementation
+ * conveniences and should not normally appear as separate folders. Keep an
+ * alias-only docset visible when it is already configured so an existing sync
+ * can still be selected and repaired.
+ *
+ * When the server emits both canonical and alias rows with the same docset
+ * name, prefer the canonical row so dropdowns do not contain duplicate values.
+ */
+export function connectableDocsets(
+	docsets: DocsetRow[],
+	configuredNames: Iterable<string> = []
+): DocsetRow[] {
+	const configured = new Set(configuredNames);
+	const byName = new Map<string, DocsetRow>();
+
+	for (const docset of docsets) {
+		const alias = docset.attributes.includes("alias");
+		if (alias && !configured.has(docset.name)) continue;
+
+		const current = byName.get(docset.name);
+		if (!current || (current.attributes.includes("alias") && !alias)) {
+			byName.set(docset.name, docset);
+		}
+	}
+
+	return Array.from(byName.values());
 }
 
 /**
@@ -171,7 +203,12 @@ export function homeSyncActive(s: OpenLoreSettings): boolean {
 	return homeStatus(s).ok && s.homeSyncConsentedFor === s.homeDocset;
 }
 
-/** Docsets the user could pick as home: writable and mounted. */
-export function homeCandidates(docsets: DocsetRow[]): DocsetRow[] {
-	return docsets.filter((d) => d.access === "rw" && d.paths.length > 0);
+/** Docsets the user could pick as home: connectable, writable, and mounted. */
+export function homeCandidates(
+	docsets: DocsetRow[],
+	configuredHome = ""
+): DocsetRow[] {
+	return connectableDocsets(docsets, configuredHome ? [configuredHome] : []).filter(
+		(d) => d.access === "rw" && d.paths.length > 0
+	);
 }

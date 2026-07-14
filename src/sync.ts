@@ -4,6 +4,22 @@ import { ResolvedMapping } from "./types";
 import { LOREFILE } from "./lorefile";
 import { SYNC_STATE_KEY, Versioned } from "./store";
 
+export interface SyncProgress {
+	phase: "pulling" | "pushing";
+	percent: number;
+	completed: number;
+	total: number;
+	current: string;
+}
+
+type SyncProgressListener = (progress: SyncProgress | null) => void;
+type SyncErrorsListener = () => void;
+
+interface PushResult {
+	pushed: number;
+	failed: number;
+}
+
 /**
  * Data-schema version of the persisted sync state. Monotonically increasing;
  * bump it and add a step in `migrateSyncState` whenever the stored shape
@@ -75,8 +91,13 @@ export class SyncEngine {
 	 */
 	readonly errorPaths = new Map<string, string>();
 	lastSync: Date | null = null;
+	progress: SyncProgress | null = null;
 
 	private readonly saveStateDebounced: () => void;
+	private readonly progressListeners = new Set<SyncProgressListener>();
+	private readonly errorListeners = new Set<SyncErrorsListener>();
+	/** Local deletes caused by a pull; do not echo these back to the server. */
+	private readonly pullDeletedPaths = new Set<string>();
 
 	constructor(private plugin: OpenLorePlugin) {
 		this.saveStateDebounced = debounce(
@@ -159,6 +180,36 @@ export class SyncEngine {
 		if (this.syncedHashes.delete(key)) this.saveStateDebounced();
 	}
 
+	onProgress(listener: SyncProgressListener): () => void {
+		this.progressListeners.add(listener);
+		listener(this.progress);
+		return () => this.progressListeners.delete(listener);
+	}
+
+	private setProgress(progress: SyncProgress | null): void {
+		this.progress = progress;
+		for (const listener of this.progressListeners) listener(progress);
+	}
+
+	onErrorsChanged(listener: SyncErrorsListener): () => void {
+		this.errorListeners.add(listener);
+		listener();
+		return () => this.errorListeners.delete(listener);
+	}
+
+	recordError(path: string, message: string): void {
+		if (this.errorPaths.get(path) === message) return;
+		this.errorPaths.set(path, message);
+		this.plugin.logDiagnostic("sync.file_error", { path, message });
+		for (const listener of this.errorListeners) listener();
+	}
+
+	private clearError(path: string): void {
+		if (!this.errorPaths.delete(path)) return;
+		this.plugin.logDiagnostic("sync.file_error_cleared", { path });
+		for (const listener of this.errorListeners) listener();
+	}
+
 	/**
 	 * Mark a writable file dirty optimistically. Any local edit means the file
 	 * diverges from the server until a push proves otherwise; the following
@@ -224,7 +275,7 @@ export class SyncEngine {
 			return false;
 		const msg = `"${m.docset}" is read-only — changes to this file won't sync.`;
 		if (this.errorPaths.get(file.path) === msg) return false;
-		this.errorPaths.set(file.path, msg);
+		this.recordError(file.path, msg);
 		return true;
 	}
 
@@ -245,7 +296,7 @@ export class SyncEngine {
 		const h = hash(content);
 		if (this.syncedHashes.get(key) === h) {
 			this.dirtyPaths.delete(file.path); // already matches the server
-			this.errorPaths.delete(file.path);
+			this.clearError(file.path);
 			return; // unchanged / from pull
 		}
 
@@ -253,13 +304,14 @@ export class SyncEngine {
 		await this.plugin.api.writeFile(key, content, m.mount);
 		this.setHash(key, h);
 		this.dirtyPaths.delete(file.path);
-		this.errorPaths.delete(file.path);
+		this.clearError(file.path);
 	}
 
 	/** Delete the remote counterpart of a deleted local file. */
 	async deleteRemote(path: string): Promise<void> {
+		if (this.pullDeletedPaths.delete(path)) return;
 		this.dirtyPaths.delete(path);
-		this.errorPaths.delete(path);
+		this.clearError(path);
 		const m = this.writableMappingFor(path);
 		if (!m) return;
 		if (!path.endsWith(".md")) return;
@@ -305,7 +357,7 @@ export class SyncEngine {
 			try {
 				await this.pushFile(f);
 			} catch (e) {
-				this.errorPaths.set(
+				this.recordError(
 					f.path,
 					e instanceof Error ? e.message : "push failed"
 				);
@@ -357,7 +409,7 @@ export class SyncEngine {
 			try {
 				await this.pushFile(f); // -> the carve-out docset
 			} catch (e) {
-				this.errorPaths.set(
+				this.recordError(
 					f.path,
 					e instanceof Error ? e.message : "push failed"
 				);
@@ -376,17 +428,45 @@ export class SyncEngine {
 	}
 
 	/** Pull every mapped folder. */
-	async pullAll(): Promise<number> {
+	async pullAll(reportProgress = false): Promise<number> {
 		let written = 0;
-		for (const m of this.mappings) {
-			written += await this.pullMapping(m);
+		const mappings = this.mappings;
+		for (let i = 0; i < mappings.length; i++) {
+			const m = mappings[i];
+			if (reportProgress) {
+				this.setProgress({
+					phase: "pulling",
+					percent: mappings.length === 0 ? 50 : (i / mappings.length) * 50,
+					completed: 0,
+					total: 0,
+					current: `Checking ${m.docset}…`,
+				});
+			}
+			written += await this.pullMapping(
+				m,
+				reportProgress
+					? (completed, total, current) => {
+							const withinMapping = total === 0 ? 1 : completed / total;
+							this.setProgress({
+								phase: "pulling",
+								percent: ((i + withinMapping) / mappings.length) * 50,
+								completed,
+								total,
+								current,
+							});
+						}
+					: undefined
+			);
 		}
 		this.lastSync = new Date();
 		return written;
 	}
 
 	/** Pull a single mapped folder's docset into the vault. */
-	async pullMapping(m: ResolvedMapping): Promise<number> {
+	async pullMapping(
+		m: ResolvedMapping,
+		onProgress?: (completed: number, total: number, current: string) => void
+	): Promise<number> {
 		if (!m.mount) return 0;
 		const mountRoot = m.mount.replace(/\/+$/, "");
 		const writable = m.access === "rw";
@@ -402,7 +482,41 @@ export class SyncEngine {
 			byLower.set(f.path.toLowerCase(), f);
 		}
 		const files = await this.plugin.api.listFiles(mountRoot);
-		for (const vfsPath of files) {
+		const remoteFiles = new Set(files);
+		const modificationTimes = await this.plugin.api.fileModificationTimes(files);
+
+		// Mirror server-side deletions, but only for files this mapping previously
+		// synced and whose local content is still unchanged. A locally edited file
+		// is preserved; for writable mappings the push phase will recreate it.
+		for (const localFile of this.plugin.app.vault.getMarkdownFiles()) {
+			if (this.mappingFor(localFile.path) !== m) continue;
+			const key = this.toVfs(m, localFile.path);
+			if (remoteFiles.has(key)) continue;
+			const lastSynced = this.syncedHashes.get(key);
+			if (lastSynced === undefined) continue;
+			const content = await this.plugin.app.vault.read(localFile);
+			if (hash(content) !== lastSynced) continue;
+
+			this.pullDeletedPaths.add(localFile.path);
+			try {
+				await this.plugin.app.vault.delete(localFile);
+			} catch (e) {
+				this.pullDeletedPaths.delete(localFile.path);
+				throw e;
+			}
+			// Obsidian normally emits the delete event before `delete` resolves.
+			// Avoid retaining a stale guard if an adapter omits that event.
+			window.setTimeout(() => this.pullDeletedPaths.delete(localFile.path), 0);
+			this.delHash(key);
+			this.dirtyPaths.delete(localFile.path);
+			this.clearError(localFile.path);
+			byLower.delete(localFile.path.toLowerCase());
+			written++;
+		}
+
+		for (let i = 0; i < files.length; i++) {
+			const vfsPath = files[i];
+			onProgress?.(i, files.length, vfsPath);
 			if (!vfsPath.startsWith(mountRoot)) continue;
 			const rel =
 				vfsPath === mountRoot
@@ -430,12 +544,32 @@ export class SyncEngine {
 			// Write to the existing file's real (possibly differently-cased)
 			// path so we update it in place instead of forking a case variant.
 			const writePath = existing ? existing.path : localPath;
+			const serverMtime = modificationTimes.get(vfsPath);
+			const lastSynced = this.syncedHashes.get(key);
+
+			// Pulled files are written with the server mtime. If both the mtime and
+			// a prior sync record still match, no content transfer is necessary.
+			if (
+				existing instanceof TFile &&
+				lastSynced !== undefined &&
+				serverMtime !== undefined &&
+				existing.stat.mtime === serverMtime
+			) {
+				continue;
+			}
+
 			const content = await this.plugin.api.readFile(vfsPath);
 
 			if (existing instanceof TFile) {
 				const current = await this.plugin.app.vault.read(existing);
 				if (current === content) {
 					this.setHash(key, hash(content));
+					if (
+						serverMtime !== undefined &&
+						existing.stat.mtime !== serverMtime
+					) {
+						await this.writeVaultFile(writePath, content, serverMtime);
+					}
 					continue; // already matches the server
 				}
 				if (writable) {
@@ -446,9 +580,9 @@ export class SyncEngine {
 				// pulled and that hasn't been edited locally since. A file that
 				// diverges (local edits, or a pre-existing note we never synced)
 				// is left untouched and flagged, never overwritten.
-				const lastPulled = this.syncedHashes.get(key);
+				const lastPulled = lastSynced;
 				if (lastPulled === undefined || lastPulled !== hash(current)) {
-					this.errorPaths.set(
+					this.recordError(
 						localPath,
 						`"${m.docset}" is read-only, but this file differs from the server copy — it was not overwritten.`
 					);
@@ -460,8 +594,8 @@ export class SyncEngine {
 			// does not trigger a push back up.
 			this.setHash(key, hash(content));
 			this.dirtyPaths.delete(localPath);
-			this.errorPaths.delete(localPath);
-			await this.writeVaultFile(writePath, content);
+			this.clearError(localPath);
+			await this.writeVaultFile(writePath, content, serverMtime);
 			// Keep the index current so a later case-variant in this same pull
 			// resolves to the file we just wrote rather than re-creating it.
 			const created =
@@ -471,44 +605,96 @@ export class SyncEngine {
 			}
 			written++;
 		}
+		onProgress?.(files.length, files.length, m.docset);
 		return written;
 	}
 
 	/** Push every file inside writable mapped folders. */
-	async pushAllWritable(): Promise<number> {
+	async pushAllWritable(reportProgress = false): Promise<PushResult> {
 		const files = this.plugin.app.vault
 			.getMarkdownFiles()
 			.filter((f) => this.isUnderWritable(f.path));
 		let pushed = 0;
-		for (const f of files) {
+		let failed = 0;
+		for (let i = 0; i < files.length; i++) {
+			const f = files[i];
+			if (reportProgress) {
+				this.setProgress({
+					phase: "pushing",
+					percent: 50 + (i / files.length) * 50,
+					completed: i,
+					total: files.length,
+					current: f.path,
+				});
+			}
 			const m = this.writableMappingFor(f.path);
 			if (!m) continue;
 			const key = this.toVfs(m, f.path);
 			const before = this.syncedHashes.get(key);
-			await this.pushFile(f);
-			if (this.syncedHashes.get(key) !== before) pushed++;
+			try {
+				await this.pushFile(f);
+				if (this.syncedHashes.get(key) !== before) pushed++;
+			} catch (e) {
+				const message = e instanceof Error ? e.message : "push failed";
+				console.error(`OpenLore: push failed for ${f.path}`, e);
+				this.recordError(f.path, message);
+				failed++;
+			}
 		}
-		return pushed;
+		if (reportProgress) {
+			this.setProgress({
+				phase: "pushing",
+				percent: 100,
+				completed: files.length,
+				total: files.length,
+				current: "Finishing sync…",
+			});
+		}
+		return { pushed, failed };
 	}
 
 	/** Full two-way sync across all mappings. */
-	async syncNow(): Promise<{ pulled: number; pushed: number }> {
-		const pulled = await this.pullAll();
-		const pushed = await this.pushAllWritable();
-		this.lastSync = new Date();
-		return { pulled, pushed };
+	async syncNow(): Promise<{ pulled: number; pushed: number; failed: number }> {
+		this.plugin.logDiagnostic("sync.started", {
+			mappings: this.mappings.map((m) => ({
+				vaultPath: m.vaultPath,
+				docset: m.docset,
+				mount: m.mount,
+				access: m.access,
+				isHome: m.isHome ?? false,
+			})),
+		});
+		try {
+			const pulled = await this.pullAll(true);
+			const { pushed, failed } = await this.pushAllWritable(true);
+			this.lastSync = new Date();
+			this.plugin.logDiagnostic("sync.completed", { pulled, pushed, failed });
+			return { pulled, pushed, failed };
+		} catch (e) {
+			this.plugin.logDiagnostic("sync.failed", {
+				message: e instanceof Error ? e.message : String(e),
+			});
+			throw e;
+		} finally {
+			this.setProgress(null);
+		}
 	}
 
-	private async writeVaultFile(path: string, content: string): Promise<void> {
+	private async writeVaultFile(
+		path: string,
+		content: string,
+		mtime?: number
+	): Promise<void> {
 		const vault = this.plugin.app.vault;
+		const options = mtime === undefined ? undefined : { mtime };
 		const existing = vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) {
-			await vault.modify(existing, content);
+			await vault.modify(existing, content, options);
 			return;
 		}
 		await this.ensureFolder(path.substring(0, path.lastIndexOf("/")));
 		try {
-			await vault.create(path, content);
+			await vault.create(path, content, options);
 		} catch (e) {
 			// `create` throws "File already exists" when the file is on disk but
 			// not (yet) in Obsidian's cache — a common race during bulk pulls, or
@@ -516,7 +702,7 @@ export class SyncEngine {
 			// to a direct adapter write, instead of failing the whole sync.
 			const again = vault.getAbstractFileByPath(path);
 			if (again instanceof TFile) {
-				await vault.modify(again, content);
+				await vault.modify(again, content, options);
 				return;
 			}
 			// Case-insensitive filesystem (macOS/Windows): the file exists at a
@@ -525,11 +711,11 @@ export class SyncEngine {
 			const lower = path.toLowerCase();
 			const ci = vault.getFiles().find((f) => f.path.toLowerCase() === lower);
 			if (ci) {
-				await vault.modify(ci, content);
+				await vault.modify(ci, content, options);
 				return;
 			}
 			if (await vault.adapter.exists(path)) {
-				await vault.adapter.write(path, content);
+				await vault.adapter.write(path, content, options);
 				return;
 			}
 			throw e;

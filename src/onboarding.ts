@@ -185,7 +185,10 @@ export class OnboardingModal extends Modal {
 			);
 		}
 
-		const candidates = homeCandidates(this.plugin.settings.docsets);
+		const candidates = homeCandidates(
+			this.plugin.settings.docsets,
+			this.plugin.settings.homeDocset
+		);
 		if (candidates.length === 0) {
 			this.renderBanner(
 				"No writable docsets",

@@ -1,4 +1,7 @@
 .openlore-sidebar {
+	display: flex;
+	flex-direction: column;
+	min-height: 100%;
 	padding: 8px;
 }
 
@@ -73,6 +76,181 @@
 
 .openlore-actions button {
 	flex: 1;
+}
+
+.openlore-sync-progress {
+	display: none;
+	margin-top: 10px;
+}
+
+.openlore-sync-progress.is-active {
+	display: block;
+}
+
+.openlore-progress-label {
+	display: flex;
+	justify-content: space-between;
+	margin-bottom: 5px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.openlore-sync-progress progress {
+	display: block;
+	width: 100%;
+	height: 6px;
+	border: 0;
+	border-radius: 999px;
+	overflow: hidden;
+	background: var(--background-modifier-border);
+	accent-color: var(--interactive-accent);
+}
+
+.openlore-sync-progress progress::-webkit-progress-bar {
+	background: var(--background-modifier-border);
+}
+
+.openlore-sync-progress progress::-webkit-progress-value {
+	background: var(--interactive-accent);
+}
+
+.openlore-progress-current {
+	margin-top: 5px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Collapsible per-file sync failures. */
+.openlore-sync-errors {
+	display: none;
+	flex: 0 0 auto;
+	margin-top: auto;
+	padding-top: 16px;
+}
+
+.openlore-sync-errors.is-active {
+	display: block;
+}
+
+.openlore-sync-errors details {
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-left: 3px solid var(--text-error);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	box-shadow: var(--shadow-s);
+}
+
+.openlore-sync-errors summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 12px;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+	list-style: none;
+}
+
+.openlore-sync-errors summary::-webkit-details-marker {
+	display: none;
+}
+
+.openlore-sync-errors summary:hover {
+	background: var(--background-modifier-hover);
+}
+
+.openlore-sync-errors-icon,
+.openlore-sync-error-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
+	color: var(--text-error);
+}
+
+.openlore-sync-errors-icon svg,
+.openlore-sync-error-icon svg {
+	width: 15px;
+	height: 15px;
+}
+
+.openlore-sync-errors-title {
+	font-weight: 600;
+}
+
+.openlore-sync-errors-count {
+	min-width: 20px;
+	margin-left: auto;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: var(--background-modifier-error);
+	color: var(--text-on-accent);
+	font-size: var(--font-ui-smaller);
+	font-weight: 700;
+	text-align: center;
+}
+
+.openlore-sync-errors-summary {
+	padding: 0 12px 10px 35px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.4;
+}
+
+.openlore-sync-errors-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-height: min(280px, 40vh);
+	padding: 0 10px 10px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	scrollbar-gutter: stable;
+}
+
+.openlore-sync-error-item {
+	min-width: 0;
+	padding: 9px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+}
+
+.openlore-sync-error-header {
+	display: flex;
+	align-items: flex-start;
+	gap: 7px;
+}
+
+.openlore-sync-error-path {
+	display: block;
+	min-width: 0;
+	max-width: 100%;
+	height: auto;
+	padding: 0;
+	border: 0;
+	box-shadow: none;
+	background: transparent;
+	color: var(--text-accent);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	line-height: 1.35;
+	text-align: left;
+	white-space: normal;
+	word-break: break-word;
+}
+
+.openlore-sync-error-message {
+	margin: 6px 0 0 22px;
+	padding: 7px 8px;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary-alt);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.45;
+	word-break: break-word;
 }
 
 /* Lists */
@@ -232,4 +410,19 @@
 
 .openlore-error-dot:hover {
 	box-shadow: 0 0 0 2px var(--background-modifier-error-hover, rgba(233, 49, 71, 0.3));
+}
+
+/* Live Preview warning for links that leave their mapped docset. */
+.openlore-external-link-warning {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 3px;
+	color: var(--color-orange, #e0913a);
+	cursor: help;
+	vertical-align: text-bottom;
+}
+
+.openlore-external-link-warning svg {
+	width: 14px;
+	height: 14px;
 }

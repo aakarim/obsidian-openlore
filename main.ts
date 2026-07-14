@@ -46,11 +46,13 @@ import {
 	writeLorefile,
 	removeLorefile,
 } from "./src/lorefile";
+import { createExternalLinkWarningExtension } from "./src/external-link-warning";
 
 const BADGE_CLASS = "openlore-tree-badge";
 const DIRTY_CLASS = "openlore-dirty-dot";
 const ERROR_CLASS = "openlore-error-dot";
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const DEVELOPER_LOG_PATH = "/tmp/obsidian-openlore.log";
 
 /**
  * Data-schema version of the persisted settings. Monotonically increasing; bump
@@ -83,6 +85,7 @@ type PreparedAuth = StoredPendingAuth & { authorizeUrl: string };
 
 export default class OpenLorePlugin extends Plugin {
 	settings: OpenLoreSettings = DEFAULT_SETTINGS;
+	readonly developerLogPath = DEVELOPER_LOG_PATH;
 	api!: OpenLoreAPI;
 	sync!: SyncEngine;
 	/** Device-local key-value store (IndexedDB); never synced by any service. */
@@ -125,6 +128,7 @@ export default class OpenLorePlugin extends Plugin {
 	async onload(): Promise<void> {
 		this.store = new KVStore(this.app);
 		await this.loadSettings();
+		this.initializeDeveloperLog();
 		this.rebuildApi();
 		this.sync = new SyncEngine(this);
 		await this.sync.loadState();
@@ -152,6 +156,7 @@ export default class OpenLorePlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.decorateDebounced())
 		);
+		this.registerEditorExtension(createExternalLinkWarningExtension(this));
 		this.hookSaveCommand();
 
 		this.addCommand({
@@ -270,11 +275,59 @@ export default class OpenLorePlugin extends Plugin {
 		this.rebuildDebounce();
 	}
 
+	async setDeveloperMode(enabled: boolean): Promise<void> {
+		this.settings.developerMode = Platform.isDesktopApp && enabled;
+		await this.saveSettings();
+		if (this.settings.developerMode) this.initializeDeveloperLog();
+	}
+
+	/** Append one JSON-line diagnostic without credentials or note contents. */
+	logDiagnostic(event: string, details: Record<string, unknown> = {}): void {
+		if (!this.settings.developerMode || !Platform.isDesktopApp) return;
+		try {
+			const req = (window as unknown as {
+				require?: (module: string) => {
+					appendFileSync: (path: string, data: string, encoding: string) => void;
+				};
+			}).require;
+			const fs = req?.("fs");
+			fs?.appendFileSync(
+				DEVELOPER_LOG_PATH,
+				JSON.stringify({ timestamp: new Date().toISOString(), event, ...details }) +
+					"\n",
+				"utf8"
+			);
+		} catch (e) {
+			console.error("OpenLore: failed to write developer diagnostics", e);
+		}
+	}
+
+	/** Start each enabled plugin session with a fresh, self-describing log. */
+	private initializeDeveloperLog(): void {
+		if (!this.settings.developerMode || !Platform.isDesktopApp) return;
+		try {
+			const req = (window as unknown as {
+				require?: (module: string) => {
+					writeFileSync: (path: string, data: string, encoding: string) => void;
+				};
+			}).require;
+			req?.("fs")?.writeFileSync(DEVELOPER_LOG_PATH, "", "utf8");
+			this.logDiagnostic("session.started", {
+				pluginVersion: this.manifest.version,
+				serverUrl: this.settings.serverUrl,
+				platform: navigator.userAgent,
+			});
+		} catch (e) {
+			console.error("OpenLore: failed to initialize developer diagnostics", e);
+		}
+	}
+
 	private rebuildApi(): void {
 		this.api = new OpenLoreAPI({
 			serverUrl: this.settings.serverUrl,
 			getToken: () => this.settings.accessToken,
 			refresh: () => this.refreshAccessToken(),
+			diagnostic: (event, details) => this.logDiagnostic(event, details),
 		});
 	}
 
@@ -1021,7 +1074,7 @@ export default class OpenLorePlugin extends Plugin {
 			} catch (e) {
 				const error = e instanceof Error ? e : new Error(String(e));
 				console.error(`OpenLore: push failed for ${path}`, error);
-				this.sync.errorPaths.set(path, error.message);
+				this.sync.recordError(path, error.message);
 				failures.push({ path, error });
 			}
 		}
@@ -1073,9 +1126,13 @@ export default class OpenLorePlugin extends Plugin {
 			return;
 		}
 		try {
-			const { pulled, pushed } = await this.sync.syncNow();
+			const { pulled, pushed, failed } = await this.sync.syncNow();
 			this.decorateExplorer();
-			this.showNotice(`OpenLore: pulled ${pulled}, pushed ${pushed}.`);
+			this.showNotice(
+				failed === 0
+					? `OpenLore: pulled ${pulled}, pushed ${pushed}.`
+					: `OpenLore: pulled ${pulled}, pushed ${pushed}; ${failed} file${failed === 1 ? "" : "s"} failed. See Sync errors in the sidebar.`
+			);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : "unknown error";
 			this.showNotice(`OpenLore: sync failed — ${msg}`);
