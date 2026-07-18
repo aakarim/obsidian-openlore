@@ -47,6 +47,7 @@ import {
 	removeLorefile,
 } from "./src/lorefile";
 import { createExternalLinkWarningExtension } from "./src/external-link-warning";
+import { SendToAgentModal } from "./src/send-to-agent";
 
 const BADGE_CLASS = "openlore-tree-badge";
 const DIRTY_CLASS = "openlore-dirty-dot";
@@ -58,11 +59,12 @@ const DEVELOPER_LOG_PATH = "/tmp/obsidian-openlore.log";
  * Data-schema version of the persisted settings. Monotonically increasing; bump
  * it and add a step in `migrateSettings` whenever the stored shape changes.
  */
-const SETTINGS_VERSION = 1;
+const SETTINGS_VERSION = 2;
+const PAUSE_DURATION_MS = 24 * 60 * 60 * 1000;
 
 /** Bring a stored settings payload up to the current shape. */
 function migrateSettings(stored: Versioned<OpenLoreSettings>): OpenLoreSettings {
-	// No shape migrations yet. Future: `if (stored.v < 2) { … }`.
+	if (stored.v < 2) stored.data.syncPausedUntil = 0;
 	return stored.data;
 }
 
@@ -118,6 +120,7 @@ export default class OpenLorePlugin extends Plugin {
 	/** Restores the wrapped `editor:save-file` command callback on unload. */
 	private restoreSaveCommand: (() => void) | null = null;
 	private pullIntervalId: number | null = null;
+	private pauseTimeoutId: number | null = null;
 	private pendingAuth: PendingAuth | null = null;
 	private preparedAuth: PreparedAuth | null = null;
 	private authPreparation = 0;
@@ -132,6 +135,7 @@ export default class OpenLorePlugin extends Plugin {
 		this.rebuildApi();
 		this.sync = new SyncEngine(this);
 		await this.sync.loadState();
+		this.restorePauseState();
 		this.rebuildDebounce();
 		this.decorateDebounced = debounce(() => this.decorateExplorer(), 300, true);
 
@@ -158,6 +162,23 @@ export default class OpenLorePlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
+				const shareable =
+					(file instanceof TFile && file.extension === "md") ||
+					(file instanceof TFolder && file.path.length > 0);
+				if (shareable && this.sync.mappingFor(file.path)?.isHome) {
+					const vfsPath = this.sync.vfsPathFor(file.path);
+					if (vfsPath) {
+						menu.addItem((item) =>
+							item
+								.setTitle("Send to agent")
+								.setIcon("send")
+								.onClick(() =>
+									new SendToAgentModal(this.app, this, file, vfsPath).open()
+								)
+						);
+					}
+				}
+
 				if (!(file instanceof TFile) || file.extension !== "md") return;
 				const vfsPath = this.sync.vfsPathFor(file.path);
 				if (!vfsPath) return;
@@ -207,6 +228,7 @@ export default class OpenLorePlugin extends Plugin {
 
 	onunload(): void {
 		this.stopPullInterval();
+		this.clearPauseTimeout();
 		if (this.saveResetTimer !== null) {
 			window.clearTimeout(this.saveResetTimer);
 			this.saveResetTimer = null;
@@ -867,6 +889,7 @@ export default class OpenLorePlugin extends Plugin {
 	async afterOnboarding(): Promise<void> {
 		if (!syncEnabled(this.settings)) return;
 		await this.rescanMappings();
+		if (this.isSyncPaused()) return;
 		this.restartPullInterval();
 		try {
 			await this.sync.syncNow();
@@ -883,7 +906,7 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private onChanged(file: TAbstractFile): void {
-		if (!syncEnabled(this.settings)) return;
+		if (!syncEnabled(this.settings) || this.isSyncPaused()) return;
 		if (!(file instanceof TFile) || file.extension !== "md") return;
 		if (!this.sync.isUnderWritable(file.path)) {
 			// Edits inside a read-only mapped folder can never be pushed. Flag
@@ -968,8 +991,9 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private onDeleted(file: TAbstractFile): void {
-		if (!syncEnabled(this.settings)) return;
+		if (!syncEnabled(this.settings) || this.isSyncPaused()) return;
 		if (file instanceof TFolder) {
+			if (this.sync.consumePullDeletion(file.path)) return;
 			// Set the guard before any await so per-child delete events (emitted
 			// by some Obsidian versions) are suppressed while we reconcile.
 			this.deletingFolders.add(file.path);
@@ -992,6 +1016,7 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private onRenamed(file: TAbstractFile, oldPath: string): void {
+		if (this.isSyncPaused()) return;
 		if (file instanceof TFolder) {
 			// Guard synchronously before the follow-up child rename events fire,
 			// then reconcile the whole subtree from this one event.
@@ -1083,7 +1108,7 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	private async flushPush(): Promise<void> {
-		if (!syncEnabled(this.settings)) {
+		if (!syncEnabled(this.settings) || this.isSyncPaused()) {
 			this.pendingPush.clear();
 			return;
 		}
@@ -1119,16 +1144,70 @@ export default class OpenLorePlugin extends Plugin {
 
 	restartPullInterval(): void {
 		this.stopPullInterval();
+		if (this.isSyncPaused()) return;
 		const ms = Math.max(1, this.settings.pullIntervalMinutes) * 60 * 1000;
 		this.pullIntervalId = this.registerInterval(
-			window.setInterval(() => void this.sync.pullAll().catch(() => {}), ms)
+			window.setInterval(() => void this.runScheduledSync(), ms)
 		);
+	}
+
+	private async runScheduledSync(): Promise<void> {
+		if (!syncEnabled(this.settings) || this.isSyncPaused() || this.sync.progress)
+			return;
+		try {
+			await this.sync.syncNow();
+			this.decorateExplorer();
+		} catch (e) {
+			console.error("OpenLore: scheduled sync failed", e);
+		}
 	}
 
 	private stopPullInterval(): void {
 		if (this.pullIntervalId !== null) {
 			window.clearInterval(this.pullIntervalId);
 			this.pullIntervalId = null;
+		}
+	}
+
+	isSyncPaused(): boolean {
+		return this.settings.syncPausedUntil > Date.now();
+	}
+
+	async setSyncPaused(paused: boolean): Promise<void> {
+		this.settings.syncPausedUntil = paused ? Date.now() + PAUSE_DURATION_MS : 0;
+		await this.saveSettings();
+		this.restorePauseState();
+		if (paused) {
+			this.pendingPush.clear();
+			this.stopPullInterval();
+			return;
+		}
+		if (syncEnabled(this.settings)) {
+			this.restartPullInterval();
+			await this.runScheduledSync();
+		}
+	}
+
+	private restorePauseState(): void {
+		this.clearPauseTimeout();
+		const remaining = this.settings.syncPausedUntil - Date.now();
+		if (remaining <= 0) {
+			if (this.settings.syncPausedUntil !== 0) {
+				this.settings.syncPausedUntil = 0;
+				void this.saveSettings();
+			}
+			return;
+		}
+		this.pauseTimeoutId = window.setTimeout(
+			() => void this.setSyncPaused(false),
+			remaining
+		);
+	}
+
+	private clearPauseTimeout(): void {
+		if (this.pauseTimeoutId !== null) {
+			window.clearTimeout(this.pauseTimeoutId);
+			this.pauseTimeoutId = null;
 		}
 	}
 

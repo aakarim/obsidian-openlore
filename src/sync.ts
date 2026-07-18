@@ -1,4 +1,4 @@
-import { TFile, debounce, normalizePath } from "obsidian";
+import { TFile, TFolder, debounce, normalizePath } from "obsidian";
 import type OpenLorePlugin from "../main";
 import { ResolvedMapping } from "./types";
 import { LOREFILE } from "./lorefile";
@@ -315,7 +315,7 @@ export class SyncEngine {
 
 	/** Delete the remote counterpart of a deleted local file. */
 	async deleteRemote(path: string): Promise<void> {
-		if (this.pullDeletedPaths.delete(path)) return;
+		if (this.consumePullDeletion(path)) return;
 		this.dirtyPaths.delete(path);
 		this.clearError(path);
 		const m = this.writableMappingFor(path);
@@ -324,6 +324,11 @@ export class SyncEngine {
 		const key = this.toVfs(m, path);
 		await this.plugin.api.deleteFile(key);
 		this.delHash(key);
+	}
+
+	/** Consume a local delete event caused by a server pull. */
+	consumePullDeletion(path: string): boolean {
+		return this.pullDeletedPaths.delete(path);
 	}
 
 	/**
@@ -490,6 +495,7 @@ export class SyncEngine {
 		const files = await this.plugin.api.listFiles(mountRoot);
 		const remoteFiles = new Set(files);
 		const modificationTimes = await this.plugin.api.fileModificationTimes(files);
+		const foldersToPrune = new Set<string>();
 
 		// Mirror server-side deletions, but only for files this mapping previously
 		// synced and whose local content is still unchanged. A locally edited file
@@ -503,6 +509,12 @@ export class SyncEngine {
 			const content = await this.plugin.app.vault.read(localFile);
 			if (hash(content) !== lastSynced) continue;
 
+			let parent = localFile.parent?.path ?? "";
+			while (parent && parent !== m.vaultPath) {
+				foldersToPrune.add(parent);
+				const slash = parent.lastIndexOf("/");
+				parent = slash < 0 ? "" : parent.slice(0, slash);
+			}
 			this.pullDeletedPaths.add(localFile.path);
 			try {
 				await this.plugin.app.vault.delete(localFile);
@@ -578,16 +590,17 @@ export class SyncEngine {
 					}
 					continue; // already matches the server
 				}
-				if (writable) {
-					// Never clobber local edits to a writable folder.
-					continue;
-				}
-				// Read-only pull is additive: only refresh a file we previously
-				// pulled and that hasn't been edited locally since. A file that
-				// diverges (local edits, or a pre-existing note we never synced)
-				// is left untouched and flagged, never overwritten.
-				const lastPulled = lastSynced;
-				if (lastPulled === undefined || lastPulled !== hash(current)) {
+				// Pull a server update only when the local copy still matches the
+				// last synced content. This protects genuine local edits without
+				// leaving an unchanged writable file permanently stale.
+				if (lastSynced === undefined || lastSynced !== hash(current)) {
+					if (writable) {
+						this.plugin.logDiagnostic("sync.pull_local_edit_preserved", {
+							localPath,
+							vfsPath,
+						});
+						continue;
+					}
 					this.recordError(
 						localPath,
 						`"${m.docset}" is read-only, but this file differs from the server copy — it was not overwritten.`
@@ -609,6 +622,27 @@ export class SyncEngine {
 			if (created instanceof TFile) {
 				byLower.set(writePath.toLowerCase(), created);
 			}
+			written++;
+		}
+
+		// File deletion does not make Obsidian remove the now-empty directory.
+		// Only inspect ancestors of files deleted above, so unrelated empty local
+		// folders are preserved. Deepest-first pruning lets empty parent chains go.
+		const prunePaths = Array.from(foldersToPrune).sort(
+			(a, b) => b.split("/").length - a.split("/").length
+		);
+		for (const path of prunePaths) {
+			const folder = this.plugin.app.vault.getAbstractFileByPath(path);
+			if (!(folder instanceof TFolder) || folder.children.length > 0) continue;
+			if (this.mappingFor(path) !== m) continue;
+			this.pullDeletedPaths.add(path);
+			try {
+				await this.plugin.app.vault.delete(folder);
+			} catch (e) {
+				this.pullDeletedPaths.delete(path);
+				throw e;
+			}
+			window.setTimeout(() => this.pullDeletedPaths.delete(path), 0);
 			written++;
 		}
 		onProgress?.(files.length, files.length, m.docset);

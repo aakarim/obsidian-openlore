@@ -2,6 +2,8 @@
 export interface DocsetRow {
 	/** Docset name. */
 	name: string;
+	/** Effective named grants such as `ro`, `rw`, or `publish`. */
+	grants: string[];
 	/** Direct filesystem writability. */
 	access: "r" | "rw";
 	/** Named attribute tokens such as `home`, `inbox`, or `alias`. */
@@ -57,10 +59,12 @@ export interface OpenLoreSettings {
 	docsets: DocsetRow[];
 	/** Default base folder suggested when mapping a new docset. */
 	vaultRoot: string;
-	/** How often to pull docsets (minutes). */
+	/** How often to run a full two-way sync (minutes). */
 	pullIntervalMinutes: number;
 	/** Quiet period (seconds) after edits before pushing your changes. */
 	autoSyncDelaySeconds: number;
+	/** Epoch milliseconds when automatic sync resumes; 0 when not paused. */
+	syncPausedUntil: number;
 	/** Write sanitized sync diagnostics to /tmp on desktop. */
 	developerMode: boolean;
 	/** Whether the user has signed in at least once. */
@@ -80,6 +84,7 @@ export const DEFAULT_SETTINGS: OpenLoreSettings = {
 	vaultRoot: "OpenLore",
 	pullIntervalMinutes: 5,
 	autoSyncDelaySeconds: 5,
+	syncPausedUntil: 0,
 	developerMode: false,
 	onboardingComplete: false,
 };
@@ -87,12 +92,12 @@ export const DEFAULT_SETTINGS: OpenLoreSettings = {
 /**
  * Parse the aligned table emitted by `lore docsets`:
  *
- *   DOCSET    ACCESS  ATTRIBUTES     PATHS
- *   public    r       -              /docs/public,/docs/getting-started.md
- *   home      rw      home,publish   /home/backend
+ *   DOCSET    GRANTS  ATTRIBUTES  PATH           TARGET
+ *   public    ro      -           /docs/public   -
+ *   home      rw      home,inbox  /home/backend  -
  *
  * No field contains spaces (multi-valued cells are comma-joined), so splitting
- * each row on whitespace runs yields exactly four columns.
+ * each row on whitespace runs yields exactly five columns.
  */
 export function parseDocsets(output: string): DocsetRow[] {
 	const rows: DocsetRow[] = [];
@@ -101,11 +106,13 @@ export function parseDocsets(output: string): DocsetRow[] {
 		if (!line) continue;
 		const cols = line.split(/\s+/);
 		if (cols.length < 4) continue;
-		const [name, access, attrs, paths] = cols;
+		const [name, grantCell, attrs, paths] = cols;
 		if (name === "DOCSET") continue; // header
+		const grants = grantCell.split(",");
 		rows.push({
 			name,
-			access: access === "rw" ? "rw" : "r",
+			grants,
+			access: grants.includes("rw") ? "rw" : "r",
 			attributes: attrs === "-" ? [] : attrs.split(","),
 			paths: paths === "-" ? [] : paths.split(","),
 		});

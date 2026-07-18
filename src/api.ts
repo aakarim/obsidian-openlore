@@ -213,6 +213,19 @@ export class OpenLoreAPI {
 		await this.shell(command);
 	}
 
+	/** Publish content to a docset's configured inbox. */
+	async publish(docset: string, fileName: string, content: string): Promise<void> {
+		this.cfg.diagnostic?.("api.publish", {
+			docset,
+			fileName,
+			contentBytes: new TextEncoder().encode(content).length,
+		});
+		const destination = `/${docset}/${fileName}`;
+		await this.shell(
+			`echo ${q(base64(content))} | base64 -d | publish ${q(destination)}`
+		);
+	}
+
 	/**
 	 * Delete a file (requires the server's `rm` command). Uses `-f` so deleting
 	 * an already-removed file is a harmless no-op — important because folder and

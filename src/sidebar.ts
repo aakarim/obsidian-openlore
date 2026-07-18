@@ -22,6 +22,8 @@ export class OpenLoreSidebarView extends ItemView {
 	private progressEl: HTMLElement | null = null;
 	private errorsEl: HTMLElement | null = null;
 	private syncButton: HTMLButtonElement | null = null;
+	private pauseButton: HTMLButtonElement | null = null;
+	private lastSyncEl: HTMLElement | null = null;
 	private unsubscribeProgress: (() => void) | null = null;
 	private unsubscribeErrors: (() => void) | null = null;
 	private errorsExpanded = false;
@@ -105,6 +107,8 @@ export class OpenLoreSidebarView extends ItemView {
 		this.progressEl = null;
 		this.errorsEl = null;
 		this.syncButton = null;
+		this.pauseButton = null;
+		this.lastSyncEl = null;
 
 		const header = el.createDiv({ cls: "openlore-title-row" });
 		header.createEl("h4", { text: "OpenLore" });
@@ -187,10 +191,12 @@ export class OpenLoreSidebarView extends ItemView {
 					"Excluded folders to avoid conflicts and data loss.",
 			});
 		}
-		if (this.plugin.sync.lastSync) {
+		this.lastSyncEl = box.createDiv({ cls: "openlore-status-sub" });
+		this.updateLastSync();
+		if (this.plugin.isSyncPaused()) {
 			box.createDiv({
 				cls: "openlore-status-sub",
-				text: `Last sync: ${this.plugin.sync.lastSync.toLocaleTimeString()}`,
+				text: `Sync paused until ${new Date(s.syncPausedUntil).toLocaleString()}`,
 			});
 		}
 	}
@@ -212,6 +218,22 @@ export class OpenLoreSidebarView extends ItemView {
 			await this.refresh();
 		});
 
+		const pauseBtn = actions.createEl("button", {
+			text: this.plugin.isSyncPaused() ? "Resume sync" : "Pause sync",
+			attr: {
+				"aria-label": this.plugin.isSyncPaused()
+					? "Resume automatic sync"
+					: "Pause automatic sync for 24 hours",
+			},
+		});
+		this.pauseButton = pauseBtn;
+		pauseBtn.disabled = !syncEnabled(s) || this.plugin.sync.progress !== null;
+		pauseBtn.addEventListener("click", async () => {
+			pauseBtn.disabled = true;
+			await this.plugin.setSyncPaused(!this.plugin.isSyncPaused());
+			this.render();
+		});
+
 		if (s.accessToken) {
 			const outBtn = actions.createEl("button", { text: "Sign out" });
 			outBtn.addEventListener("click", () => {
@@ -228,9 +250,14 @@ export class OpenLoreSidebarView extends ItemView {
 	}
 
 	private updateProgress(progress: SyncProgress | null): void {
+		if (progress === null) this.updateLastSync();
 		if (this.syncButton) {
 			this.syncButton.textContent = progress ? "Syncing…" : "Sync now";
 			this.syncButton.disabled =
+				progress !== null || !syncEnabled(this.plugin.settings);
+		}
+		if (this.pauseButton) {
+			this.pauseButton.disabled =
 				progress !== null || !syncEnabled(this.plugin.settings);
 		}
 		if (!this.progressEl) return;
@@ -258,6 +285,15 @@ export class OpenLoreSidebarView extends ItemView {
 			cls: "openlore-progress-current",
 			text: progress.current,
 		});
+	}
+
+	private updateLastSync(): void {
+		if (!this.lastSyncEl) return;
+		const lastSync = this.plugin.sync.lastSync;
+		this.lastSyncEl.toggleAttribute("hidden", lastSync === null);
+		this.lastSyncEl.setText(
+			lastSync ? `Last sync: ${lastSync.toLocaleTimeString()}` : ""
+		);
 	}
 
 	private updateErrors(): void {

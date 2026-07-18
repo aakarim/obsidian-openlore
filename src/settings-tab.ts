@@ -95,8 +95,8 @@ export class OpenLoreSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Pull interval")
-			.setDesc("Minutes between automatic pulls from the server.")
+			.setName("Sync interval")
+			.setDesc("Minutes between automatic two-way syncs with the server.")
 			.addText((t) =>
 				t.setValue(String(s.pullIntervalMinutes)).onChange(async (v) => {
 					const n = parseInt(v, 10);

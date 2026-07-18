@@ -27,12 +27,17 @@ the file explorer — hover it to see which docset (and read/write vs read-only)
 it maps to.
 
 - A **writable** docset (`rw`, e.g. your home) is pushed: edits/creates/deletes
-  in its folder mirror up automatically (debounced).
+  in its folder mirror up automatically (debounced and on the sync interval).
 - A **read-only** docset is pulled into its folder, refreshed on a timer and on
   demand. Writable folders are never overwritten by a pull.
 
 Add a folder from the OpenLore panel (**+**) or the *Map an OpenLore folder*
 command: pick a docset, pick a vault location, done.
+
+Right-click a home-workspace note or folder and choose **Send to agent** to share
+a pointer with one or more agents. The plugin discovers writable agent inboxes
+from `lore docsets`; the source stays in your home workspace while each selected
+agent receives a small pointer note in its inbox.
 
 All communication is over HTTPS to go-openlore's JSON API (`POST /api/shell`),
 authenticated with a short-lived OAuth bearer token (auto-refreshed). File
@@ -82,11 +87,13 @@ Open it from the **brain** ribbon icon or the *Open OpenLore panel* command. It
 is the plugin's control surface:
 
 - Connection status, signed-in identity, and last-sync time.
-- **Sync now** and **Sign in / Sign out** buttons.
+- **Sync now**, **Pause sync / Resume sync**, and **Sign in / Sign out** buttons.
+  Pausing stops automatic sync and expires after 24 hours; manual sync remains
+  available.
 - **Synced folders**: your folder→docset mappings, with **+** to add and an
   unlink button to remove one.
 - Connection settings: server URL and sign-in.
-- Sync settings: default base folder, auto-sync delay, pull interval.
+- Sync settings: default base folder, auto-sync delay, sync interval.
 
 ## Debugging
 
