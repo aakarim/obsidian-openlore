@@ -267,6 +267,16 @@ export class SyncEngine {
 		return m?.mount ? this.toVfs(m, path) : null;
 	}
 
+	/** Resolve a vault path to a copyable path relative to the OpenLore root. */
+	openLorePathFor(path: string): string | null {
+		const m = this.mappingFor(path);
+		if (!m?.mount) return null;
+		const relativePath = relOf(m.vaultPath, path);
+		return m.isHome
+			? `~/${relativePath}`
+			: this.toVfs(m, path).replace(/^\/+/, "");
+	}
+
 	/**
 	 * A local edit inside a read-only mapped folder can never be pushed. Flag it
 	 * with an error so the user isn't left wondering why it didn't sync. Returns

@@ -181,13 +181,24 @@ export default class OpenLorePlugin extends Plugin {
 
 				if (!(file instanceof TFile) || file.extension !== "md") return;
 				const vfsPath = this.sync.vfsPathFor(file.path);
-				if (!vfsPath) return;
-				menu.addItem((item) =>
+				if (vfsPath) {
+					menu.addItem((item) =>
+						item
+							.setTitle("Copy OpenLore web link")
+							.setIcon("link")
+							.onClick(() => void this.copyOpenLoreWebLink(vfsPath))
+					);
+				}
+				const openLorePath = this.sync.openLorePathFor(file.path);
+				menu.addItem((item) => {
 					item
-						.setTitle("Copy OpenLore web link")
-						.setIcon("link")
-						.onClick(() => void this.copyOpenLoreWebLink(vfsPath))
-				);
+						.setTitle("Copy OpenLore path")
+						.setIcon("copy")
+						.setDisabled(!openLorePath);
+					if (openLorePath) {
+						item.onClick(() => void this.copyOpenLorePath(openLorePath));
+					}
+				});
 			})
 		);
 		this.registerEditorExtension(createExternalLinkWarningExtension(this));
@@ -389,6 +400,15 @@ export default class OpenLorePlugin extends Plugin {
 		}
 	}
 
+	private async copyOpenLorePath(path: string): Promise<void> {
+		try {
+			await navigator.clipboard.writeText(path);
+			this.showNotice("OpenLore path copied.");
+		} catch {
+			this.showNotice("OpenLore: couldn’t copy the path.");
+		}
+	}
+
 	/** Notify onboarding UI when an OAuth callback outlives its original modal. */
 	onAuthRecovery(listener: (error: string | null) => void): () => void {
 		this.authRecoveryListeners.add(listener);
@@ -467,9 +487,16 @@ export default class OpenLorePlugin extends Plugin {
 	}
 
 	/** Map a docset into a (possibly new) vault folder and pull it once. */
-	async addMapping(docset: string, vaultPath: string): Promise<void> {
+	async addMapping(
+		docset: string,
+		vaultPath: string,
+		onProgress?: (completed: number, total: number, current: string) => void
+	): Promise<void> {
+		onProgress?.(0, 0, "Creating vault folder…");
 		await this.ensureVaultFolder(vaultPath);
+		onProgress?.(0, 0, "Saving folder mapping…");
 		await writeLorefile(this.app.vault.adapter, vaultPath, docset);
+		onProgress?.(0, 0, "Refreshing available folders…");
 		if (settingsValid(this.settings)) await this.refreshDocsets();
 		await this.rescanMappings();
 		const m = this.mappings.find((x) => x.vaultPath === vaultPath);
@@ -478,10 +505,13 @@ export default class OpenLorePlugin extends Plugin {
 			// notes into the new docset and drop the copies left behind in home.
 			// (Read-only carve-outs keep their home copies — see reconcileCarveOut.)
 			if (homeSyncActive(this.settings) && m.access === "rw" && !m.isHome) {
+				onProgress?.(0, 0, "Moving existing notes…");
 				await this.sync.reconcileCarveOut(vaultPath);
 			}
-			await this.sync.pullMapping(m);
+			onProgress?.(0, 0, "Scanning OpenLore folder…");
+			await this.sync.pullMapping(m, onProgress);
 		}
+		onProgress?.(1, 1, "Folder added");
 		this.decorateExplorer();
 	}
 

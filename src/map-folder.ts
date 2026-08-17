@@ -1,4 +1,13 @@
-import { App, Modal, Setting, Notice, normalizePath } from "obsidian";
+import {
+	App,
+	ButtonComponent,
+	DropdownComponent,
+	Modal,
+	Notice,
+	Setting,
+	TextComponent,
+	normalizePath,
+} from "obsidian";
 import type OpenLorePlugin from "../main";
 import { connectableDocsets, DocsetRow } from "./types";
 
@@ -13,7 +22,10 @@ export class MapFolderModal extends Modal {
 	private pathEdited = false;
 	private busy = false;
 	private status?: HTMLElement;
-	private addButton?: import("obsidian").ButtonComponent;
+	private progressEl?: HTMLElement;
+	private addButton?: ButtonComponent;
+	private docsetDropdown?: DropdownComponent;
+	private pathText?: TextComponent;
 
 	constructor(
 		app: App,
@@ -65,12 +77,11 @@ export class MapFolderModal extends Modal {
 		this.docset = docsets[0].name;
 		this.vaultPath = this.suggestPath(docsets[0]);
 
-		let pathText: import("obsidian").TextComponent;
-
 		new Setting(contentEl)
 			.setName("Docset")
 			.setDesc("Which server docset to sync into your vault")
 			.addDropdown((d) => {
+				this.docsetDropdown = d;
 				for (const ds of docsets) {
 					const tag = ds.access === "rw" ? "read/write" : "read-only";
 					d.addOption(ds.name, `${ds.name} (${tag})`);
@@ -82,7 +93,7 @@ export class MapFolderModal extends Modal {
 						const ds = docsets.find((x) => x.name === v);
 						if (ds) {
 							this.vaultPath = this.suggestPath(ds);
-							pathText?.setValue(this.vaultPath);
+							this.pathText?.setValue(this.vaultPath);
 						}
 					}
 				});
@@ -92,7 +103,7 @@ export class MapFolderModal extends Modal {
 			.setName("Vault folder")
 			.setDesc("Where it lives in your vault (you can rename it later)")
 			.addText((t) => {
-				pathText = t;
+				this.pathText = t;
 				t.setPlaceholder("Folder path")
 					.setValue(this.vaultPath)
 					.onChange((v) => {
@@ -102,6 +113,7 @@ export class MapFolderModal extends Modal {
 			});
 
 		this.status = contentEl.createDiv({ cls: "openlore-onboarding-status" });
+		this.progressEl = contentEl.createDiv({ cls: "openlore-sync-progress" });
 
 		new Setting(contentEl).addButton((b) => {
 			this.addButton = b;
@@ -131,6 +143,23 @@ export class MapFolderModal extends Modal {
 		this.status.toggleClass("is-error", error);
 	}
 
+	private updateProgress(completed: number, total: number, current: string): void {
+		if (!this.progressEl) return;
+		this.progressEl.empty();
+		this.progressEl.addClass("is-active");
+		const row = this.progressEl.createDiv({ cls: "openlore-progress-label" });
+		row.createSpan({ text: "Adding folder" });
+		row.createSpan({ text: total > 0 ? `${completed} / ${total}` : "Preparing…" });
+		const progress = this.progressEl.createEl("progress", {
+			attr: { max: "100", "aria-label": "Add folder progress" },
+		});
+		if (total > 0) progress.value = Math.min(100, (completed / total) * 100);
+		this.progressEl.createDiv({
+			cls: "openlore-progress-current",
+			text: current,
+		});
+	}
+
 	private async add(): Promise<void> {
 		if (this.busy) return;
 		const path = normalizePath(this.vaultPath.trim().replace(/^\/+|\/+$/g, ""));
@@ -139,17 +168,26 @@ export class MapFolderModal extends Modal {
 			return this.setStatus("That folder is already mapped.", true);
 		}
 
+		const docset = this.docset;
 		this.busy = true;
 		this.addButton?.setDisabled(true);
-		this.setStatus("Creating folder and pulling…");
+		this.docsetDropdown?.setDisabled(true);
+		this.pathText?.setDisabled(true);
+		this.setStatus("");
+		this.updateProgress(0, 0, "Creating vault folder…");
 		try {
-			await this.plugin.addMapping(this.docset, path);
-			new Notice(`OpenLore: mapped ${this.docset} → ${path}`);
+			await this.plugin.addMapping(docset, path, (completed, total, current) =>
+				this.updateProgress(completed, total, current)
+			);
+			new Notice(`OpenLore: mapped ${docset} → ${path}`);
 			this.close();
 			this.onDone();
 		} catch (e) {
 			this.busy = false;
 			this.addButton?.setDisabled(false);
+			this.docsetDropdown?.setDisabled(false);
+			this.pathText?.setDisabled(false);
+			this.progressEl?.removeClass("is-active");
 			const msg = e instanceof Error ? e.message : "failed to map folder";
 			this.setStatus(msg, true);
 		}
